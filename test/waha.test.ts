@@ -28,10 +28,15 @@ test('WAHA onboarding creates one persisted session with signed message.any webh
       sessionReads += 1;
       return sessionReads === 1
         ? new Response('', { status: 404 })
-        : jsonResponse({ name: 'observer', status: 'SCAN_QR_CODE', me: null });
+        : sessionReads === 2
+          ? jsonResponse({ name: 'observer', status: 'STOPPED', me: null })
+          : jsonResponse({ name: 'observer', status: 'SCAN_QR_CODE', me: null });
     }
     if (url.endsWith('/api/sessions') && calls.at(-1)?.method === 'POST') {
       return jsonResponse({ name: 'observer', status: 'STARTING' }, 201);
+    }
+    if (url.endsWith('/api/sessions/observer/start') && calls.at(-1)?.method === 'POST') {
+      return jsonResponse({ name: 'observer', status: 'STARTING' });
     }
     if (url.endsWith('/api/observer/auth/qr')) {
       assert.equal(headers.get('accept'), 'application/json');
@@ -49,6 +54,7 @@ test('WAHA onboarding creates one persisted session with signed message.any webh
     const create = calls.find((call) => call.method === 'POST' && call.url.endsWith('/api/sessions'));
     assert.ok(create);
     assert.equal(create.headers.get('x-api-key'), process.env.WAHA_API_KEY);
+    assert.ok(calls.some((call) => call.method === 'POST' && call.url.endsWith('/api/sessions/observer/start')));
     const session = create.body?.config as {
       noweb: { store: { enabled: boolean; fullSync: boolean } };
       webhooks: Array<{ url: string; events: string[]; hmac: { key: string } }>;

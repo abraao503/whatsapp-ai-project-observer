@@ -172,6 +172,10 @@ export async function connectWahaSession(): Promise<WahaConnection> {
     } catch (error) {
       if (!(error instanceof WahaApiError) || error.statusCode !== 409) throw error;
     }
+    const created = await getSession();
+    if (created && !['WORKING', 'STARTING', 'SCAN_QR_CODE'].includes(String(created.status))) {
+      await wahaRequest(`${sessionPath()}/start`, { method: 'POST', body: {} });
+    }
   } else if (!['WORKING', 'STARTING', 'SCAN_QR_CODE'].includes(String(existing.status))) {
     await wahaRequest(sessionPath(), { method: 'PUT', body: sessionConfiguration() });
     await wahaRequest(`${sessionPath()}/start`, { method: 'POST', body: {} });
