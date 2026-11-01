@@ -250,7 +250,7 @@ $('#waha-chats-refresh').addEventListener('click',refreshWahaChats);
 $('#conversation-form').elements.provider.addEventListener('change',()=>{$('#waha-chat').disabled=$('#conversation-form').elements.provider.value!=='waha'||previousWahaStatus!=='WORKING'});
 $('#waha-chat').addEventListener('change',()=>{const chat=wahaChats.find(item=>item.id===$('#waha-chat').value);if(!chat)return;$('#conversation-jid').value=chat.id;$('#conversation-form').elements.display_name.value=chat.name});
 $('#conversation-jid').addEventListener('input',()=>{if($('#conversation-jid').value!==$('#waha-chat').value)$('#waha-chat').value=''});
-$('#linear-key-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const api_key=form.elements.api_key.value;try{const result=await api('/settings/linear','POST',{api_key});form.reset();notify(result.restartScheduled?'Chave salva. O serviço está reiniciando para aplicar a configuração.':'Chave salva; reinicie o serviço para aplicar a configuração.');if(!result.restartScheduled)await refresh()}catch(error){notify(error.message,true)}});
+$('#linear-key-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const api_key=form.elements.api_key.value;try{await api('/settings/linear','POST',{api_key});form.reset();notify('Chave salva e aplicada.');await refresh()}catch(error){notify(error.message,true)}});
 window.editProject=(id)=>{const p=state.projects.find(item=>item.id===id);if(!p)return;const form=$('#project-form');form.elements.id.value=p.id;form.elements.name.value=p.name;form.elements.description.value=p.description;form.elements.repository_path.value=p.repository_path;form.elements.reference_branch.value=p.reference_branch;form.elements.linear_team_id.value=p.linear_team_id;form.elements.linear_project_id.value=p.linear_project_id;form.elements.analysis_instructions.value=p.analysis_instructions;$('#project-form-title').textContent='Editar projeto #'+id;$('#cancel-edit').hidden=false;window.scrollTo({top:0,behavior:'smooth'})};
 window.editConversation=(id)=>{const c=state.conversations.find(item=>item.id===id);if(!c)return;const form=$('#conversation-form');form.elements.provider.value=c.provider;form.elements.instance.value=c.instance;form.elements.remote_jid.value=c.remote_jid;form.elements.display_name.value=c.display_name||'';const ids=new Set((c.projects||[]).map(project=>String(project.id)));for(const option of $('#conversation-projects').options)option.selected=ids.has(option.value);$('#conversation-form').scrollIntoView({behavior:'smooth',block:'center'})};
 window.unmonitor=async(id)=>{if(!confirm('Parar de observar esta conversa?'))return;try{await api('/conversations/'+id,'DELETE');notify('Monitoramento removido; histórico preservado.');await refresh()}catch(e){notify(e.message,true)}};
@@ -306,14 +306,8 @@ export function registerAdminRoutes(app: FastifyInstance): void {
     if (typeof body.api_key !== 'string') return reply.code(400).send({ error: 'Informe api_key como texto' });
     try {
       await saveLinearApiKey(body.api_key);
-      const restartScheduled = Boolean(process.env.pm_id);
-      if (restartScheduled) {
-        reply.raw.once('finish', () => {
-          const restart = setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
-          restart.unref();
-        });
-      }
-      return { ok: true, restartScheduled };
+      config.linearApiKey = body.api_key.trim();
+      return { ok: true };
     } catch (error) {
       return sendApiError(reply, error);
     }

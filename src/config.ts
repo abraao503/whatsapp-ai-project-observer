@@ -1,4 +1,10 @@
-import 'dotenv/config';
+import { config as loadDotenv } from 'dotenv';
+import path from 'node:path';
+
+const envFile = loadDotenv({ path: path.resolve(process.cwd(), '.env') }).parsed;
+// Linear's key is editable from the admin panel. Prefer its persisted .env value
+// over a stale copy retained by PM2 when it respawns the process.
+if (envFile?.LINEAR_API_KEY !== undefined) process.env.LINEAR_API_KEY = envFile.LINEAR_API_KEY;
 
 function numberFromEnv(name: string, fallback: number, minimum = 1): number {
   const raw = process.env[name];
