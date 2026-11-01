@@ -5,7 +5,8 @@ import { registerAdminRoutes } from './admin.js';
 import { noteWebhook, ingestMessages } from './modules/whatsapp-store.js';
 import { parseWebhook, type Provider } from './modules/whatsapp.js';
 import { secureEquals, verifyWahaHmac } from './modules/webhook-security.js';
-import { openAiStatus, validateModelAccess } from './modules/openai.js';
+import { interpreterStatus, validateCodexAccess } from './modules/interpreter.js';
+import { transcriptionStatus } from './modules/transcription.js';
 import { startWorker } from './jobs/worker.js';
 
 declare module 'fastify' {
@@ -86,7 +87,7 @@ export function createApp(): FastifyInstance {
   app.get('/health', async (_request, reply) => {
     try {
       await pool.query('SELECT 1');
-      return { status: 'ok', model: openAiStatus().state };
+      return { status: 'ok', model: interpreterStatus().state, transcription: transcriptionStatus().state };
     } catch {
       return reply.code(503).send({ status: 'database_unavailable' });
     }
@@ -129,10 +130,10 @@ async function main(): Promise<void> {
   app.log.info({ address }, 'whatsapp observer online');
   const worker = startWorker();
 
-  void validateModelAccess().then((status) => {
-    if (status.state === 'available') app.log.info({ model: status.model }, 'OpenAI model validated');
-    else app.log.warn({ model: status.model, state: status.state, detail: status.detail }, 'OpenAI model unavailable; batches remain pending');
-  }).catch((error) => recordError('openai:model-check', error));
+  void validateCodexAccess().then((status) => {
+    if (status.state === 'available') app.log.info({ model: status.model }, 'Codex CLI authenticated for interpretation');
+    else app.log.warn({ model: status.model, state: status.state, detail: status.detail }, 'Codex CLI unavailable; batches remain pending');
+  }).catch((error) => recordError('codex:login-check', error));
 
   let closing = false;
   const shutdown = async (signal: string) => {

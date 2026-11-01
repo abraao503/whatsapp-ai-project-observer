@@ -4,7 +4,7 @@ import { retryDelayMs } from '../batching.js';
 import { processBatchInterpretation } from '../modules/demands.js';
 import { analyzeRepository, type CodexTask } from '../modules/codex.js';
 import { createOrUpdateIssue, type LinearDemand, type LinearProject } from '../modules/linear.js';
-import { openAiStatus, validateModelAccess } from '../modules/openai.js';
+import { interpreterStatus, validateCodexAccess } from '../modules/interpreter.js';
 
 interface ClaimedBatch {
   id: number;
@@ -359,7 +359,7 @@ export function startWorker(): { stop: () => void } {
   let activeBatches = 0;
   let activeCodex = 0;
   let activeLinear = false;
-  let lastModelValidation = Date.now();
+  let lastCodexValidation = Date.now();
   let lastCleanup = 0;
 
   const runBatch = async (batch: ClaimedBatch) => {
@@ -382,12 +382,12 @@ export function startWorker(): { stop: () => void } {
     if (busy || stopping) return;
     busy = true;
     try {
-      if (config.openAiApiKey && openAiStatus().state !== 'available' && Date.now() - lastModelValidation > 5 * 60_000) {
-        lastModelValidation = Date.now();
-        const status = await validateModelAccess();
-        if (status.state !== 'available') console.warn(`[openai:model] ${status.detail}`);
+      if (interpreterStatus().state !== 'available' && Date.now() - lastCodexValidation > 5 * 60_000) {
+        lastCodexValidation = Date.now();
+        const status = await validateCodexAccess();
+        if (status.state !== 'available') console.warn(`[codex:interpreter] ${status.detail}`);
       }
-      while (openAiStatus().state === 'available' && activeBatches < config.maxParallelBatches) {
+      while (interpreterStatus().state === 'available' && activeBatches < config.maxParallelBatches) {
         const batch = await claimBatch();
         if (!batch) break;
         void runBatch(batch);

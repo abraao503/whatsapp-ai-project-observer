@@ -1,8 +1,9 @@
 import type { PoolClient } from 'pg';
 import { config } from '../config.js';
 import { inTransaction, pool } from '../db/index.js';
-import type { Interpretation, ObserverContext } from './openai.js';
-import { interpret } from './openai.js';
+import type { Interpretation, ObserverContext } from './interpreter.js';
+import { interpret } from './interpreter.js';
+import { transcribeAudio } from './transcription.js';
 import type { NormalizedMessage } from './whatsapp.js';
 import { normalizeDemandTitle } from './whatsapp.js';
 
@@ -73,18 +74,18 @@ async function lockProjects<T>(projectIds: number[], work: () => Promise<T>): Pr
   }
 }
 
-function mediaFileName(media: Record<string, unknown>): string {
-  const fileName = typeof media.fileName === 'string' ? media.fileName : '';
-  return /^[a-zA-Z0-9._-]{1,100}$/.test(fileName) ? fileName : 'voice.ogg';
-}
-
 function mediaMimeType(media: Record<string, unknown>): string {
   const mimeType = typeof media.mimetype === 'string' ? media.mimetype : '';
   return mimeType.startsWith('audio/') ? mimeType : 'audio/ogg';
 }
 
 async function loadAudioBytes(message: StoredMessage): Promise<Buffer> {
-  if (message.audioBase64) return Buffer.from(message.audioBase64.replace(/\s/g, ''), 'base64');
+  if (message.audioBase64) {
+    const bytes = Buffer.from(message.audioBase64.replace(/\s/g, ''), 'base64');
+    if (!bytes.length) throw new Error('O áudio recebido está vazio');
+    if (bytes.length > config.maxAudioBytes) throw new Error('O áudio excede MAX_AUDIO_BYTES');
+    return bytes;
+  }
   const mediaUrl = typeof message.media.url === 'string' ? message.media.url : '';
   const apiUrl = message.provider === 'waha' ? config.wahaApiUrl : config.evolutionApiUrl;
   const apiKey = message.provider === 'waha' ? config.wahaApiKey : config.evolutionApiKey;
@@ -150,8 +151,7 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
     };
     try {
       const bytes = await loadAudioBytes(message);
-      const { transcribeAudio } = await import('./openai.js');
-      const transcript = await transcribeAudio(bytes, mediaMimeType(row.media), mediaFileName(row.media));
+      const transcript = await transcribeAudio(bytes, mediaMimeType(row.media));
       await pool.query(
         `UPDATE messages SET transcript = $2, transcript_status = 'done',
           transcript_error = NULL, audio_base64 = NULL

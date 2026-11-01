@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -13,8 +16,7 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
   process.env.ADMIN_USER = 'test-admin';
   process.env.ADMIN_PASSWORD = 'test-password';
   process.env.EVOLUTION_WEBHOOK_TOKEN = 'test-webhook-token';
-  process.env.OPENAI_API_KEY = 'mock-openai-key';
-  process.env.OPENAI_MODEL = 'gpt-6-luna';
+  process.env.CODEX_MODEL = 'gpt-6-luna';
   process.env.LINEAR_API_KEY = 'mock-linear-key';
   process.env.REPOSITORY_ROOTS = '/tmp';
   process.env.BATCH_IDLE_MS = '50';
@@ -23,17 +25,63 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
   process.env.MAX_PARALLEL_BATCHES = '1';
   process.env.CODEX_CONCURRENCY = '1';
   process.env.CODEX_MAX_ATTEMPTS = '1';
-  process.env.CODEX_CLI = '/tmp/observer-test-codex-does-not-exist';
+  const originalCodexCli = process.env.CODEX_CLI;
+  const originalCodexHome = process.env.CODEX_HOME;
+  const fixtureDirectory = await mkdtemp(path.join(tmpdir(), 'observer-flow-codex-'));
+  const fakeCodex = path.join(fixtureDirectory, 'codex');
+  const releaseFirst = path.join(fixtureDirectory, 'release-first');
+  const inputLog = path.join(fixtureDirectory, 'inputs.jsonl');
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('codex test-fixture'); process.exit(0); }
+if (args[0] === 'login' && args[1] === 'status') { console.log('Logged in using ChatGPT'); process.exit(0); }
+if (args[0] !== 'exec' || !args.includes('--output-schema')) {
+  console.error('synthetic repository analysis failure'); process.exit(1);
+}
+if (process.env.OPENAI_API_KEY) { console.error('OPENAI_API_KEY must not reach Codex'); process.exit(2); }
+let prompt = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { prompt += chunk; });
+process.stdin.on('end', async () => {
+  try {
+    const match = prompt.match(/<contexto_json>\\s*([\\s\\S]*?)\\s*<\\/contexto_json>/);
+    if (!match) throw new Error('context JSON absent');
+    const context = JSON.parse(match[1]);
+    const project = context.projects[0];
+    const prior = project.demands[0];
+    const message = context.batchMessages[0];
+    const update = Boolean(prior);
+    const result = {
+      conversationSummary: update ? 'Cliente pediu exportação em Excel e confirmou filtros por data e funcionário.' : 'Cliente pediu exportação de relatórios em Excel.',
+      actions: [{
+        action: update ? 'update' : 'new', demandId: prior?.id ?? null, demandVersion: prior?.version ?? null,
+        projectId: project.id,
+        title: update ? 'Exportar relatórios em Excel com filtros' : 'Exportar relatórios em Excel',
+        summary: update ? 'Exportar os relatórios em Excel, com filtros por data e funcionário.' : 'Permitir exportar os relatórios para uma planilha Excel.',
+        type: 'feature',
+        requirements: update ? ['Exportar relatórios em Excel', 'Filtrar por data', 'Filtrar por funcionário'] : ['Exportar relatórios em Excel'],
+        acceptanceCriteria: update ? ['A planilha contém apenas os registros que atendem aos filtros.'] : ['O sistema gera uma planilha Excel com os relatórios.'],
+        openQuestions: [], ready: true, confidence: 0.96, decision: '', evidenceMessageIds: [message.id]
+      }]
+    };
+    fs.appendFileSync(${JSON.stringify(inputLog)}, JSON.stringify({ model: args[args.indexOf('--model') + 1], context }) + '\\n');
+    const output = args[args.indexOf('--output-last-message') + 1];
+    fs.writeFileSync(output, JSON.stringify(result));
+    console.log('model: ' + args[args.indexOf('--model') + 1]);
+    if (fs.readFileSync(${JSON.stringify(inputLog)}, 'utf8').trim().split('\\n').length === 1) {
+      const deadline = Date.now() + 10000;
+      while (!fs.existsSync(${JSON.stringify(releaseFirst)}) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  } catch (error) { console.error(error); process.exitCode = 1; }
+});
+`, { mode: 0o700 });
+  await chmod(fakeCodex, 0o700);
+  process.env.CODEX_CLI = fakeCodex;
+  process.env.CODEX_HOME = fixtureDirectory;
 
-  const calls: Array<{ service: 'openai' | 'linear'; operation: string; body: Record<string, unknown> }> = [];
-  const interpretationContexts: Array<{
-    batchMessages: Array<{ id: string; text: string; fromMe: boolean }>;
-    projects: Array<{ id: number; demands: Array<{ id: number; version: number }> }>;
-  }> = [];
-  let interpretationCount = 0;
-  let firstInterpretationStarted = false;
-  let releaseFirstInterpretation: (() => void) | undefined;
-  const firstInterpretationGate = new Promise<void>((resolve) => { releaseFirstInterpretation = resolve; });
+  const calls: Array<{ service: 'linear'; operation: string; body: Record<string, unknown> }> = [];
   const originalFetch = globalThis.fetch;
   let worker: { stop: () => void } | undefined;
   let app: import('fastify').FastifyInstance | undefined;
@@ -47,59 +95,6 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-    if (url.includes('api.openai.com')) {
-      if (url.endsWith('/models/gpt-6-luna')) {
-        calls.push({ service: 'openai', operation: 'validate-model', body });
-        return new Response(JSON.stringify({ id: 'gpt-6-luna' }), { status: 200 });
-      }
-      if (url.endsWith('/responses')) {
-        calls.push({ service: 'openai', operation: 'interpret', body });
-        const request = body as {
-          input: Array<{ role: string; content: string }>;
-        };
-        const context = JSON.parse(request.input.find((item) => item.role === 'user')!.content) as {
-          batchMessages: Array<{ id: string; text: string; fromMe: boolean }>;
-          projects: Array<{ id: number; demands: Array<{ id: number; version: number }> }>;
-        };
-        interpretationContexts.push(context);
-        interpretationCount += 1;
-        if (interpretationCount === 1) {
-          firstInterpretationStarted = true;
-          await firstInterpretationGate;
-        }
-        const message = context.batchMessages[0]!;
-        const priorDemand = context.projects[0]?.demands[0];
-        const isRefinement = Boolean(priorDemand);
-        const interpretation = {
-          conversationSummary: isRefinement
-            ? 'Cliente pediu exportação em Excel; operador acrescentou filtros por data e funcionário.'
-            : 'Cliente pediu exportação de relatórios em Excel.',
-          actions: [{
-            action: isRefinement ? 'update' : 'new',
-            demandId: priorDemand?.id ?? null,
-            demandVersion: priorDemand?.version ?? null,
-            projectId: context.projects[0]!.id,
-            title: isRefinement ? 'Exportar relatórios em Excel com filtros' : 'Exportar relatórios em Excel',
-            summary: isRefinement
-              ? 'Exportar os relatórios em Excel, com filtros por data e funcionário.'
-              : 'Permitir exportar os relatórios para uma planilha Excel.',
-            type: 'feature',
-            requirements: isRefinement
-              ? ['Exportar relatórios em Excel', 'Filtrar por data', 'Filtrar por funcionário']
-              : ['Exportar relatórios em Excel'],
-            acceptanceCriteria: isRefinement
-              ? ['A planilha contém apenas registros que atendem aos filtros escolhidos.']
-              : ['O sistema gera uma planilha Excel com os relatórios.'],
-            openQuestions: [],
-            ready: true,
-            confidence: 0.96,
-            decision: '',
-            evidenceMessageIds: [message.id]
-          }]
-        };
-        return new Response(JSON.stringify({ output_text: JSON.stringify(interpretation) }), { status: 200 });
-      }
-    }
     if (url === 'https://api.linear.app/graphql') {
       const query = String(body.query);
       if (query.includes('query FindObserverIssue')) {
@@ -189,8 +184,8 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
       [projectId, conversationId]
     );
 
-    const { validateModelAccess } = await import('../src/modules/openai.js');
-    const model = await validateModelAccess();
+    const { validateCodexAccess } = await import('../src/modules/interpreter.js');
+    const model = await validateCodexAccess();
     assert.equal(model.state, 'available');
     const { createApp } = await import('../src/server.js');
     app = createApp();
@@ -220,7 +215,11 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
     assert.equal(firstWebhook.statusCode, 202, firstWebhook.body);
     assert.deepEqual(JSON.parse(firstWebhook.body), { received: true, stored: 1, duplicates: 0, ignored: 0 });
 
-    await waitFor(async () => firstInterpretationStarted, Boolean, 'início da primeira interpretação');
+    await waitFor(
+      async () => readFile(inputLog, 'utf8').catch(() => ''),
+      (log) => Boolean(log.trim()),
+      'início da primeira interpretação pelo Codex CLI'
+    );
 
     const duplicateWebhook = await app.inject({
       method: 'POST',
@@ -243,7 +242,7 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
     });
     assert.equal(refinement.statusCode, 202, refinement.body);
     assert.deepEqual(JSON.parse(refinement.body), { received: true, stored: 1, duplicates: 0, ignored: 0 });
-    releaseFirstInterpretation?.();
+    await writeFile(releaseFirst, 'continue');
 
     const firstDemand = await waitFor(async () => {
       const result = await db!.pool.query<{
@@ -274,11 +273,20 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
     assert.equal(updateVariables.id, 'local-issue-42');
     assert.equal(updateVariables.input.title, 'Exportar relatórios em Excel com filtros');
     assert.match(updateVariables.input.description, /Filtrar por data/);
+    const interpretationContexts = (await readFile(inputLog, 'utf8'))
+      .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as {
+        model: string;
+        context: {
+          batchMessages: Array<{ id: string; text: string; fromMe: boolean }>;
+          projects: Array<{ id: number; demands: Array<{ id: number; version: number }> }>;
+        };
+      });
     assert.equal(interpretationContexts.length, 2, 'o webhook duplicado não gerou outra interpretação');
-    assert.equal(interpretationContexts[0]?.batchMessages.length, 1, 'o primeiro lote é uma visão fixa');
-    assert.equal(interpretationContexts[0]?.batchMessages[0]?.fromMe, false);
-    assert.equal(interpretationContexts[1]?.batchMessages.length, 1, 'a mensagem durante a análise ficou no lote seguinte');
-    assert.equal(interpretationContexts[1]?.batchMessages[0]?.fromMe, true);
+    assert.ok(interpretationContexts.every((item) => item.model === 'gpt-6-luna'));
+    assert.equal(interpretationContexts[0]?.context.batchMessages.length, 1, 'o primeiro lote é uma visão fixa');
+    assert.equal(interpretationContexts[0]?.context.batchMessages[0]?.fromMe, false);
+    assert.equal(interpretationContexts[1]?.context.batchMessages.length, 1, 'a mensagem durante a análise ficou no lote seguinte');
+    assert.equal(interpretationContexts[1]?.context.batchMessages[0]?.fromMe, true);
 
     const codexFinished = await waitFor(async () => {
       const result = await db!.pool.query<{ status: string }>(
@@ -289,7 +297,6 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
     assert.equal(codexFinished, 'failed');
     assert.equal(updatedDemand.linear_issue_id, 'local-issue-42', 'falha Codex preserva o card criado');
   } finally {
-    releaseFirstInterpretation?.();
     worker?.stop();
     if (app) await app.close();
     if (db) {
@@ -308,5 +315,10 @@ test('mocked WhatsApp webhook persists a demand, creates a Linear card, then edi
       await db.pool.end();
     }
     globalThis.fetch = originalFetch;
+    await rm(fixtureDirectory, { recursive: true, force: true });
+    if (originalCodexCli === undefined) delete process.env.CODEX_CLI;
+    else process.env.CODEX_CLI = originalCodexCli;
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
   }
 });

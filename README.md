@@ -25,7 +25,7 @@ Preencha `.env`, configure um `DATABASE_URL` local, credenciais administrativas 
 npm run dev
 ```
 
-O servidor aplica o schema idempotente na inicialização. O worker fica no mesmo processo. Sem chave OpenAI, as mensagens e os lotes ficam persistidos e aguardam processamento; sem credencial Linear ou Codex, seus jobs permanecem registrados para configuração/retry posterior.
+O servidor aplica o schema idempotente na inicialização. O worker fica no mesmo processo. A interpretação usa o Codex CLI autenticado com ChatGPT, fixado em `gpt-6-luna`, sem `OPENAI_API_KEY`. A transcrição de voz usa `whisper.cpp` localmente; nenhum áudio é enviado a uma API de transcrição.
 
 Comandos de verificação local:
 
@@ -39,7 +39,7 @@ Os testes locais cobrem cálculo de debounce, limite do lote, backoff, normaliza
 
 ### Validar o fluxo local com PostgreSQL
 
-Os testes de fluxo usam um PostgreSQL local real e mockam a entrada WhatsApp e o endpoint GraphQL do Linear. O fluxo padrão usa respostas OpenAI controladas para validar criação/edição do card, webhook duplicado, mensagem própria durante uma análise em andamento e recuperação de lote após reinício. Os testes adicionais cobrem debounce, duplicatas que não prolongam o lote, isolamento entre conversas, mensagens fora de ordem, limite máximo de espera, abertura do próximo lote ao atingir a capacidade e preservação de áudio após falha de transcrição.
+Os testes de fluxo usam um PostgreSQL local real, um Codex CLI de fixture e o endpoint GraphQL do Linear mockado. O fluxo valida criação/edição do card, webhook duplicado, mensagem própria durante uma interpretação em andamento e recuperação de lote após reinício. Os testes adicionais cobrem debounce, duplicatas que não prolongam o lote, isolamento entre conversas, mensagens fora de ordem, limite máximo de espera, abertura do próximo lote ao atingir a capacidade e preservação de áudio após falha no transcritor local.
 
 Use um banco local exclusivo. Se já existir PostgreSQL local, crie nele um banco de teste separado e use a URL abaixo ajustada. Se não houver, este container descartável é opcional e restrito ao loopback:
 
@@ -70,13 +70,13 @@ Os testes removem os registros temporários que criam. O container não publica 
 
 ### Avaliação comportamental com GPT-6 Luna via Codex CLI
 
-O Codex CLI autenticado pode executar as mesmas instruções e schema JSON do interpretador do app sem uma chave OpenAI API. A avaliação injeta mensagens sintéticas pelo webhook, usa o PostgreSQL local, deixa o worker real processar os lotes e mocka somente o Linear. A primeira resposta Luna é segurada brevemente para enviar um refinamento durante o processamento; a saída registrada permite revisar como o modelo agrupou, criou e atualizou a demanda. Depois avalia dois assuntos no mesmo lote, uma mensagem vaga e um cancelamento explícito. Também cria um repositório Git sintético, roda a análise técnica pelo Codex CLI em sandbox `read-only` e confirma que a análise foi publicada no mesmo card sem alterar o repositório. As chamadas de interpretação usam `gpt-6-luna` confirmado no cabeçalho do Codex CLI.
+O script chama a mesma função de interpretação do backend, pelo Codex CLI autenticado, sem usar chave OpenAI API. Ele avalia uma demanda nova, refinamento do mesmo ID/versão, dois assuntos no lote e mensagem vaga. Não faz chamadas ao WhatsApp nem ao Linear.
 
 ```sh
-TEST_DATABASE_URL="$TEST_DATABASE_URL" npm run eval:luna
+npm run eval:luna
 ```
 
-Esse caminho valida decisões reais do Luna através do Codex CLI, o fluxo local de persistência/card e a análise técnica real do Codex. Ele não valida a autenticação nem a disponibilidade da chave da OpenAI API usada pela aplicação em produção; essa validação continua sendo feita pelo backend com `GET /v1/models/gpt-6-luna`. O relatório completo das interpretações sintéticas e o tamanho das análises saem no terminal; a avaliação retorna código diferente de zero se o modelo não criar/refinar a mesma demanda, se o Codex exceder o limite de tamanho ou se falhar nos casos de ambiguidade, múltiplos assuntos, cancelamento e análise somente de leitura.
+Esse caminho consome o uso do Codex associado à conta autenticada. O modelo é passado explicitamente como `gpt-6-luna`; se o CLI não tiver acesso a ele, a execução falha e não há fallback. As interpretações sintéticas saem no terminal.
 
 ## Banco PostgreSQL
 
@@ -100,11 +100,25 @@ Cadastre explicitamente cada conversa autorizada no painel `/admin`, escolhendo 
 
 Configure a URL da API do provedor de WhatsApp para que o processo Node consiga acessá-la. Se estiver em Docker, use um endereço de rede alcançável pelo host ou receba o webhook pelo Nginx HTTPS. O áudio sem base64 fica preservado como transcrição pendente/falha e o lote não é apagado.
 
-### OpenAI
+### Interpretação com Codex CLI
 
-O padrão é exatamente `gpt-6-luna`. No boot o serviço chama `GET /v1/models/gpt-6-luna` com a chave configurada; os lotes só são interpretados se essa chave puder acessar o modelo. Se o modelo não existir ou não estiver permitido para a conta, o sistema mantém os lotes pendentes e mostra o estado no painel. Não há fallback silencioso.
+Instale e autentique o Codex CLI para o mesmo usuário do PM2. O backend verifica `codex login status` e executa `codex exec --model gpt-6-luna` em modo não interativo, read-only e ephemeral, com schema JSON estruturado. O identificador do modelo é fixo por `CODEX_MODEL`; se o CLI não aceitar `gpt-6-luna`, o lote falha com retry e não troca de modelo. Não configure `OPENAI_API_KEY`.
 
-O modelo de transcrição é configurável em `OPENAI_TRANSCRIBE_MODEL`, inicialmente `whisper-1`. Interpretação estruturada usa Responses API com schema JSON estrito, contexto recente e demandas abertas do projeto.
+### Transcrição local de áudio
+
+Instale `whisper.cpp` e `ffmpeg`, baixe um modelo multilíngue adequado e configure `WHISPER_CPP_CLI` e `WHISPER_MODEL_PATH`. Exemplo para Ubuntu ARM64/x86_64, compilando a versão `v1.9.5` e usando o modelo multilíngue `small-q5_1`:
+
+```sh
+sudo apt-get install -y --no-install-recommends build-essential cmake ffmpeg
+mkdir -p ~/.local/opt ~/.local/share/whisper
+git clone --branch v1.9.5 --depth 1 https://github.com/ggml-org/whisper.cpp.git ~/.local/opt/whisper.cpp-v1.9.5
+cmake -S ~/.local/opt/whisper.cpp-v1.9.5 -B ~/.local/opt/whisper.cpp-v1.9.5/build -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/.local/opt/whisper.cpp-v1.9.5/build --config Release -j2 --target whisper-cli
+curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin \\
+  -o ~/.local/share/whisper/ggml-small-q5_1.bin
+```
+
+O padrão de idioma é `pt`, o modelo `small` multilíngue quantizado é um ponto inicial equilibrado, e `WHISPER_THREADS=1` evita saturar uma VPS de 2 vCPUs. `ffmpeg` converte o áudio recebido para WAV mono 16 kHz antes da transcrição. O modelo é baixado uma vez; a inferência é local. Se faltar o binário/modelo ou a transcrição falhar, o lote registra erro e mantém o áudio armazenado para retry.
 
 ### Linear
 
@@ -131,9 +145,7 @@ O lote pendente, suas mensagens, datas, estado, tentativas, erros e agendamento 
 
 ## Deploy manual na VPS
 
-O usuário faz o deploy. Esta implementação não copia arquivos nem altera serviços remotos.
-
-1. Copie o projeto para um diretório dedicado, por exemplo `/home/ubuntu/whatsapp-ai-project-observer`; não coloque `.env` no Git.
+1. Clone o projeto em um diretório dedicado, por exemplo `/home/ubuntu/whatsapp-ai-project-observer`; não coloque `.env` no Git.
 2. Carregue NVM no shell, instale deps, preencha `.env`, compile e crie a pasta de logs:
 
    ```sh
@@ -192,7 +204,7 @@ Projetos e contatos são configurados no painel. Ao salvar um projeto, o caminho
 
 ## Limitações que dependem de credenciais/ambiente de deploy
 
-- O acesso de conta a `gpt-6-luna`, Linear, chaves do WhatsApp e Codex CLI só pode ser validado com as credenciais reais do deploy. A aplicação executa o check exato do modelo.
+- O Linear, as credenciais do provedor WhatsApp e os projetos/conversas observados precisam ser configurados no ambiente de deploy. O painel e `/health` mostram o status do Codex; o acesso a `gpt-6-luna` é confirmado na primeira interpretação real, sem fallback.
 - Configure o provedor WhatsApp e os eventos que sua instalação envia; Evolution e WAHA têm parsers próprios.
 - O download de áudio de uma URL do provedor só aceita o caminho `/api/files/...` e exige que o processo alcance a API configurada.
-- Não há testes end-to-end com banco remoto ou APIs externas nesta primeira versão local.
+- Os testes de fluxo com PostgreSQL exigem `TEST_DATABASE_URL`; a avaliação Luna usa quatro conversas sintéticas e a conta autenticada do Codex CLI.

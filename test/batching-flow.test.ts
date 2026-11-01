@@ -13,7 +13,7 @@ test('webhook deduplicates, groups nearby messages, caps the wait, and splits at
   process.env.ADMIN_USER = 'test-admin';
   process.env.ADMIN_PASSWORD = 'test-password';
   process.env.EVOLUTION_WEBHOOK_TOKEN = 'test-webhook-token';
-  process.env.OPENAI_API_KEY = '';
+  process.env.CODEX_MODEL = 'gpt-6-luna';
   process.env.BATCH_IDLE_MS = '200';
   process.env.BATCH_MAX_WAIT_MS = '350';
   process.env.BATCH_MAX_MESSAGES = '4';

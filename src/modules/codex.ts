@@ -63,7 +63,7 @@ export async function validateRepositoryPath(repositoryPath: string): Promise<st
   return resolved;
 }
 
-function runCaptured(
+export function runCaptured(
   executable: string,
   args: string[],
   options: { cwd?: string; timeoutMs: number; input?: string; outputLimit?: number; env?: NodeJS.ProcessEnv }
@@ -212,7 +212,7 @@ async function validateSnapshotSymlinks(root: string): Promise<void> {
   await visit(realRoot);
 }
 
-function codexEnvironment(): NodeJS.ProcessEnv {
+export function codexEnvironment(): NodeJS.ProcessEnv {
   const allowed = ['PATH', 'HOME', 'CODEX_HOME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'XDG_CONFIG_HOME'];
   return Object.fromEntries(allowed.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
 }

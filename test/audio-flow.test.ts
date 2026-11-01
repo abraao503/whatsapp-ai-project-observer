@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -13,9 +16,15 @@ test('transcription failure preserves audio and records a retryable message stat
   process.env.ADMIN_USER = 'test-admin';
   process.env.ADMIN_PASSWORD = 'test-password';
   process.env.EVOLUTION_WEBHOOK_TOKEN = 'test-webhook-token';
-  process.env.OPENAI_API_KEY = 'mock-openai-key';
-  process.env.OPENAI_MODEL = 'gpt-6-luna';
-  process.env.OPENAI_API_TIMEOUT_MS = '5000';
+  const fixtureDirectory = await mkdtemp(path.join(tmpdir(), 'observer-audio-test-'));
+  const modelPath = path.join(fixtureDirectory, 'model.bin');
+  const fakeFfmpeg = path.join(fixtureDirectory, 'ffmpeg');
+  await writeFile(modelPath, 'test model');
+  await writeFile(fakeFfmpeg, '#!/bin/sh\necho "falha transitória de teste" >&2\nexit 1\n', { mode: 0o700 });
+  await chmod(fakeFfmpeg, 0o700);
+  process.env.WHISPER_MODEL_PATH = modelPath;
+  process.env.WHISPER_CPP_CLI = path.join(fixtureDirectory, 'unused-whisper-cli');
+  process.env.FFMPEG_CLI = fakeFfmpeg;
 
   const originalFetch = globalThis.fetch;
   let db: typeof import('../src/db/index.js') | undefined;
@@ -26,11 +35,7 @@ test('transcription failure preserves audio and records a retryable message stat
   let previousWebhookState: unknown;
   let hadWebhookState = false;
 
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    assert.equal(url, 'https://api.openai.com/v1/audio/transcriptions');
-    return new Response(JSON.stringify({ error: { message: 'falha transitória de teste' } }), { status: 503 });
-  };
+  globalThis.fetch = async (input) => { throw new Error(`Transcrição local não deveria chamar rede: ${String(input)}`); };
 
   try {
     db = await import('../src/db/index.js');
@@ -96,7 +101,7 @@ test('transcription failure preserves audio and records a retryable message stat
     const { processBatchInterpretation } = await import('../src/modules/demands.js');
     await assert.rejects(
       processBatchInterpretation(batch.rows[0]!.id),
-      /OpenAI 503: falha transitória de teste/
+      /ffmpeg saiu com código 1: falha transitória de teste/
     );
 
     const failed = await db.pool.query<{
@@ -126,5 +131,6 @@ test('transcription failure preserves audio and records a retryable message stat
       await db.pool.end();
     }
     globalThis.fetch = originalFetch;
+    await rm(fixtureDirectory, { recursive: true, force: true });
   }
 });

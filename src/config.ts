@@ -30,15 +30,19 @@ export const config = {
   evolutionApiKey: process.env.EVOLUTION_API_KEY ?? '',
   wahaApiUrl: process.env.WAHA_API_URL?.replace(/\/$/, '') ?? '',
   wahaApiKey: process.env.WAHA_API_KEY ?? '',
-  openAiApiKey: process.env.OPENAI_API_KEY ?? '',
-  openAiModel: process.env.OPENAI_MODEL ?? 'gpt-6-luna',
-  openAiTranscribeModel: process.env.OPENAI_TRANSCRIBE_MODEL ?? 'whisper-1',
-  openAiApiTimeoutMs: numberFromEnv('OPENAI_API_TIMEOUT_MS', 60_000),
+  codexModel: process.env.CODEX_MODEL ?? 'gpt-6-luna',
+  codexInterpretationTimeoutMs: numberFromEnv('CODEX_INTERPRETATION_TIMEOUT_MS', 240_000),
   linearApiKey: process.env.LINEAR_API_KEY ?? '',
   linearMaxAttempts: numberFromEnv('LINEAR_MAX_ATTEMPTS', 12),
   repositoryRoots: splitPaths(process.env.REPOSITORY_ROOTS),
   codexCli: process.env.CODEX_CLI ?? 'codex',
   codexTimeoutMs: numberFromEnv('CODEX_TIMEOUT_MS', 600_000),
+  whisperCppCli: process.env.WHISPER_CPP_CLI ?? 'whisper-cli',
+  whisperModelPath: process.env.WHISPER_MODEL_PATH ?? '',
+  ffmpegCli: process.env.FFMPEG_CLI ?? 'ffmpeg',
+  whisperLanguage: process.env.WHISPER_LANGUAGE ?? 'pt',
+  whisperThreads: numberFromEnv('WHISPER_THREADS', 1),
+  whisperTimeoutMs: numberFromEnv('WHISPER_TIMEOUT_MS', 300_000),
   codexMaxAttempts: numberFromEnv('CODEX_MAX_ATTEMPTS', 5),
   batchIdleMs: numberFromEnv('BATCH_IDLE_MS', 90_000),
   batchMaxWaitMs: numberFromEnv('BATCH_MAX_WAIT_MS', 300_000),
@@ -59,5 +63,5 @@ export function validateConfig(): void {
   if (config.batchMaxWaitMs < config.batchIdleMs) {
     throw new Error('BATCH_MAX_WAIT_MS deve ser >= BATCH_IDLE_MS');
   }
-  if (config.openAiModel !== 'gpt-6-luna') throw new Error('OPENAI_MODEL deve ser exatamente gpt-6-luna');
+  if (config.codexModel !== 'gpt-6-luna') throw new Error('CODEX_MODEL deve ser exatamente gpt-6-luna');
 }

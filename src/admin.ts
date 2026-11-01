@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerHookHandl
 import { config } from './config.js';
 import { inTransaction, pool } from './db/index.js';
 import { codexCliStatus, validateRepositoryPath } from './modules/codex.js';
-import { openAiStatus } from './modules/openai.js';
+import { interpreterStatus } from './modules/interpreter.js';
+import { transcriptionStatus } from './modules/transcription.js';
 import { secureEquals } from './modules/webhook-security.js';
 import { retryBatch, retryDemand } from './jobs/worker.js';
 
@@ -125,7 +126,8 @@ async function overview() {
   return {
     integrations: {
       database: 'ok',
-      openai: openAiStatus(),
+      interpreter: interpreterStatus(),
+      transcription: transcriptionStatus(),
       linear: { configured: Boolean(config.linearApiKey), detail: config.linearApiKey ? 'Chave configurada' : 'LINEAR_API_KEY ausente' },
       codex: codexCliStatus(),
       whatsapp: {
@@ -210,7 +212,7 @@ const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&a
 function notify(text, error=false){const node=$('#notice');node.textContent=text;node.style.display='block';node.style.background=error?'#922f2f':'#176b4d';setTimeout(()=>node.style.display='none',4500)}
 async function api(path, method='GET', body){const response=await fetch('/admin/api'+path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||('HTTP '+response.status));return data}
 function pill(text, mode=''){return '<span class="pill '+mode+'">'+esc(text)+'</span>'}
-function statusCards(i){const cards=[['PostgreSQL',i.database],['OpenAI',i.openai.state+' · '+i.openai.model],['Linear',i.linear.configured?'chave configurada':'sem chave'],['Codex CLI',i.codex.installed?i.codex.detail:'não instalado'],['WAHA',i.whatsapp.waha.webhookConfigured?'webhook com HMAC':'HMAC não configurado'],['Evolution API',i.whatsapp.evolution.webhookConfigured?'token configurado':'token não configurado']];$('#status').innerHTML=cards.map(([label,value])=>'<div class="stat"><span>'+esc(label)+'</span><b>'+esc(value)+'</b></div>').join('')+'<div class="stat"><span>Último webhook WAHA</span><b>'+esc(i.whatsapp.waha.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Último webhook Evolution</span><b>'+esc(i.whatsapp.evolution.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Modelo</span><b>'+esc(i.openai.detail)+'</b></div>'}
+function statusCards(i){const cards=[['PostgreSQL',i.database],['Codex · interpretação',i.interpreter.state+' · '+i.interpreter.model],['Whisper.cpp · áudio',i.transcription.state+' · '+i.transcription.model],['Linear',i.linear.configured?'chave configurada':'sem chave'],['Codex CLI',i.codex.installed?i.codex.detail:'não instalado'],['WAHA',i.whatsapp.waha.webhookConfigured?'webhook com HMAC':'HMAC não configurado'],['Evolution API',i.whatsapp.evolution.webhookConfigured?'token configurado':'token não configurado']];$('#status').innerHTML=cards.map(([label,value])=>'<div class="stat"><span>'+esc(label)+'</span><b>'+esc(value)+'</b></div>').join('')+'<div class="stat"><span>Último webhook WAHA</span><b>'+esc(i.whatsapp.waha.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Último webhook Evolution</span><b>'+esc(i.whatsapp.evolution.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Interpretação</span><b>'+esc(i.interpreter.detail)+'</b></div>'+'<div class="stat"><span>Transcrição</span><b>'+esc(i.transcription.detail)+'</b></div>'}
 function render(){const s=state;statusCards(s.integrations);
   $('#projects').innerHTML=s.projects.length?s.projects.map(p=>'<div class="row"><div class="row-main"><strong>'+esc(p.name)+' '+(p.active?pill('ativo'):pill('pausado','warn'))+'</strong><div class="meta">'+esc(p.repository_path)+' · branch '+esc(p.reference_branch)+' · '+p.conversation_count+' conversas · '+p.demand_count+' demandas</div><div class="meta">Linear team: '+esc(p.linear_team_id||'não definido')+' · project: '+esc(p.linear_project_id||'não definido')+'</div></div><div class="actions"><button class="small secondary" onclick="editProject('+p.id+')">Editar</button></div></div>').join(''):'<p>Nenhum projeto cadastrado.</p>';
   $('#conversations').innerHTML=s.conversations.length?s.conversations.map(c=>'<div class="row"><div class="row-main"><strong>'+esc(c.display_name||c.remote_jid)+' '+pill(c.provider)+'</strong><div class="meta">'+esc(c.instance)+' · '+esc(c.remote_jid)+' · projetos: '+esc((c.projects||[]).map(p=>p.name+' (#'+p.id+')').join(', '))+'</div><div class="meta">Último webhook: '+esc(c.last_webhook_at||'nenhum')+'</div></div><button class="small danger" onclick="unmonitor('+c.id+')">Parar monitoramento</button></div>').join(''):'<p>Nenhuma conversa vinculada.</p>';
