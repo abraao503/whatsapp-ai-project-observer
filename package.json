@@ -12,7 +12,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "test": "node --import tsx --test test/core.test.ts test/codex.test.ts test/transcription.test.ts",
+    "test": "node --import tsx --test test/core.test.ts test/codex.test.ts test/transcription.test.ts test/waha.test.ts test/admin-settings.test.ts",
     "test:flow": "node --import tsx --test --test-concurrency=1 test/flow.test.ts test/batching-flow.test.ts test/audio-flow.test.ts",
     "eval:luna": "node --import tsx scripts/eval-luna.ts"
   },

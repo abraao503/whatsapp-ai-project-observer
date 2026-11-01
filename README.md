@@ -93,12 +93,16 @@ Não rode o SQL se a role ou banco já existirem; confira o estado primeiro. Con
 
 ### WhatsApp
 
-Cadastre explicitamente cada conversa autorizada no painel `/admin`, escolhendo o provedor, nome da instância/sessão, JID do contato ou grupo e um ou mais projetos. Eventos de conversas ainda não cadastradas são descartados. O webhook só persiste a mensagem e agenda o lote; não chama IA nem Codex durante a requisição.
+Cadastre explicitamente cada conversa autorizada no painel `/admin`. Depois de conectar a conta WAHA, carregue os contatos/grupos, escolha a conversa e selecione um ou mais projetos relacionados; o JID continua editável para entrada manual e para Evolution. Vínculos existentes podem ser editados pela lista de conversas. A seleção no painel apenas concede monitoramento após salvar; eventos de outras conversas são descartados. O webhook só persiste a mensagem e agenda o lote; não chama IA nem Codex durante a requisição.
 
 - Evolution: configure `EVOLUTION_WEBHOOK_TOKEN` e envie os eventos `MESSAGES_UPSERT` e `SEND_MESSAGE` para `/webhooks/evolution/<token>`. Para mídia, configure a integração para incluir base64 (`webhookBase64`) ou forneça `EVOLUTION_API_URL` e chave de API compatíveis com um endpoint `/api/files/...`.
-- WAHA: configure `WAHA_HMAC_KEY` igual ao segredo de assinatura do webhook e aponte `message` e `message.any` a `/webhooks/waha`. Para baixar áudio sem base64, configure `WAHA_API_URL` como URL acessível a partir do processo Node e, se necessário, `WAHA_API_KEY`.
+- WAHA: o projeto usa uma instância própria local em `127.0.0.1:3201`. O painel inicia a sessão `observer`, configura `message.any` com assinatura HMAC e mostra o QR/status. A API do WAHA fica restrita ao loopback; mensagens não monitoradas são descartadas pelo Observer. Para baixar áudio sem base64, o processo usa a API local autenticada.
 
-Configure a URL da API do provedor de WhatsApp para que o processo Node consiga acessá-la. Se estiver em Docker, use um endereço de rede alcançável pelo host ou receba o webhook pelo Nginx HTTPS. O áudio sem base64 fica preservado como transcrição pendente/falha e o lote não é apagado.
+Para conectar um número, abra `/admin`, selecione **Conectar número do WhatsApp** e escaneie o QR em WhatsApp → Dispositivos conectados. O estado da conexão e o nome/número da conta são atualizados pelo painel. A sessão fica persistida no volume `/home/ubuntu/.local/share/whatsapp-observer/waha-sessions`, inclusive após reiniciar o container. A sessão habilita o armazenamento NOWEB com sincronização histórica limitada; isso é necessário para listar contatos e grupos e não deve ser alterado depois do pareamento.
+
+Na VPS ARM64, a instância usa `devlikeapro/waha:noweb-arm-2026.10.1`, uma versão fixada do engine NOWEB. Ela roda em container Docker separado, com `--network host`, mas o servidor WAHA está configurado para escutar somente em `127.0.0.1:3201`; não publique a porta na Internet nem altere o container WAHA de outros projetos. A API key de WAHA fica hasheada no arquivo de ambiente do container; o Observer guarda a chave correspondente em `.env`, com permissões restritas.
+
+O áudio sem base64 fica preservado como transcrição pendente/falha e o lote não é apagado.
 
 ### Interpretação com Codex CLI
 
@@ -114,7 +118,7 @@ mkdir -p ~/.local/opt ~/.local/share/whisper
 git clone --branch v1.9.5 --depth 1 https://github.com/ggml-org/whisper.cpp.git ~/.local/opt/whisper.cpp-v1.9.5
 cmake -S ~/.local/opt/whisper.cpp-v1.9.5 -B ~/.local/opt/whisper.cpp-v1.9.5/build -DCMAKE_BUILD_TYPE=Release
 cmake --build ~/.local/opt/whisper.cpp-v1.9.5/build --config Release -j2 --target whisper-cli
-curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin \\
+curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin \
   -o ~/.local/share/whisper/ggml-small-q5_1.bin
 ```
 
@@ -122,13 +126,27 @@ O padrão de idioma é `pt`, o modelo `small` multilíngue quantizado é um pont
 
 ### Linear
 
-Configure `LINEAR_API_KEY`. Para cada projeto, preencha `linear_team_id` e, quando desejado, `linear_project_id`. A issue inclui um marcador interno determinístico usado na reconciliação após timeout; atualizações e retries mantêm o mesmo vínculo.
+Configure ou troque `LINEAR_API_KEY` diretamente no painel, em **Configuração do Linear**. A chave é gravada no `.env` com modo privado, nunca é exibida novamente e o processo PM2 reinicia após salvar. No desenvolvimento local, reinicie o processo manualmente depois de alterar a chave. Para cada projeto, preencha `linear_team_id` e, quando desejado, `linear_project_id` no cadastro/edição de projeto. A issue inclui um marcador interno determinístico usado na reconciliação após timeout; atualizações e retries mantêm o mesmo vínculo.
 
 Os cards usam um modelo editorial curto: objetivo/escopo, requisitos, critérios de aceite, dúvidas pendentes e contexto/decisões. Seções opcionais sem conteúdo são omitidas. O tipo é exibido em português e a análise Codex entra em uma seção separada. O agente tem alvos flexíveis: título normalmente com 5–12 palavras; resumo em 2–3 frases; 2–5 requisitos e 2–4 critérios verificáveis; até 3 dúvidas que possam alterar o escopo. Pedidos simples podem usar menos itens. O sistema valida limites para evitar respostas excessivas: título até 140 caracteres, resumo até 1.800, no máximo 8 requisitos, 6 critérios e 4 dúvidas. O Codex é orientado a escrever normalmente 100–160 palavras, chegando a cerca de 200 em análises realmente complexas, com até 3 caminhos, 3 passos de implementação e 2–3 verificações sugeridas.
 
 ### Codex CLI
 
 Instale e autentique o Codex CLI para o mesmo usuário que executa a aplicação no PM2. Se o binário não estiver no `PATH` desse usuário, defina `CODEX_CLI` com seu caminho completo. O worker cria um snapshot do commit configurado via `git archive` e executa `codex exec` em modo não interativo, com sandbox read-only, saída temporária e timeout. O CLI recebe o snapshot, não o repositório gravável; não executa comandos originados de conversas. `REPOSITORY_ROOTS` é obrigatório para cadastrar repositórios.
+
+### WAHA próprio na VPS
+
+Use uma instância separada daquelas pertencentes a outros projetos. O servidor API deve ficar somente no loopback; não publique a porta 3201. Exemplo para a imagem ARM64 usada nesta VPS, sem Docker Compose:
+
+```sh
+docker run --detach --name whatsapp-observer-waha \
+  --restart unless-stopped --network host --memory 2g --cpus 1 \
+  --env-file /home/ubuntu/.config/whatsapp-observer/waha.env \
+  --volume /home/ubuntu/.local/share/whatsapp-observer/waha-sessions:/app/.sessions \
+  devlikeapro/waha:noweb-arm-2026.10.1
+```
+
+O arquivo privado `waha.env` define `WHATSAPP_API_HOSTNAME=127.0.0.1`, `WHATSAPP_API_PORT=3201`, `WHATSAPP_DEFAULT_ENGINE=NOWEB`, uma `WAHA_API_KEY` em formato SHA-512, desativa Dashboard/Swagger e mantém o QR fora dos logs. No `.env` do Observer, configure `WAHA_API_URL=http://127.0.0.1:3201`, a chave original em `WAHA_API_KEY`, `WAHA_HMAC_KEY` e `WAHA_SESSION=observer`. O painel cria/atualiza a sessão e a assinatura do webhook ao iniciar o pareamento.
 
 ## Debounce, sequência e recuperação
 

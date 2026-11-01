@@ -5,6 +5,8 @@ import { codexCliStatus, validateRepositoryPath } from './modules/codex.js';
 import { interpreterStatus } from './modules/interpreter.js';
 import { transcriptionStatus } from './modules/transcription.js';
 import { secureEquals } from './modules/webhook-security.js';
+import { connectWahaSession, getWahaConnection, listWahaChats } from './modules/waha.js';
+import { saveLinearApiKey } from './modules/admin-settings.js';
 import { retryBatch, retryDemand } from './jobs/worker.js';
 
 const adminAuth: preHandlerHookHandler = async (request, reply) => {
@@ -138,7 +140,7 @@ async function overview() {
         },
         waha: {
           webhookConfigured: Boolean(config.wahaHmacKey),
-          apiConfigured: Boolean(config.wahaApiUrl),
+          apiConfigured: Boolean(config.wahaApiUrl && config.wahaApiKey && config.wahaHmacKey),
           lastWebhookAt: hookTimes.get('last_webhook:waha') || null
         }
       }
@@ -177,6 +179,18 @@ const adminHtml = `<!doctype html>
   <div id="notice"></div>
   <header><div><h1>WhatsApp AI Project Observer</h1><p>Conversas autorizadas → demandas → Linear → análise Codex</p></div><button class="secondary" id="refresh">Atualizar</button></header>
   <section><h2>Integrações</h2><div id="status" class="stats"></div></section>
+  <section><h2>Conectar número do WhatsApp</h2>
+    <p>Sessão WAHA local: <strong>${config.wahaSession}</strong>. O Observer só recebe mensagens; não envia respostas pelo WhatsApp.</p>
+    <p id="waha-status">Consultando a instância WAHA…</p>
+    <p id="waha-account" class="meta"></p>
+    <img id="waha-qr" alt="QR code para conectar o WhatsApp" hidden style="width:256px;height:256px;border:1px solid var(--line);border-radius:8px">
+    <div class="actions"><button type="button" id="waha-connect">Conectar número / gerar QR</button><button type="button" class="secondary" id="waha-refresh">Atualizar status</button></div>
+    <p>Para parear, no celular abra WhatsApp → Dispositivos conectados → Conectar dispositivo e leia o QR exibido aqui.</p>
+  </section>
+  <section><h2>Configuração do Linear</h2>
+    <p id="linear-key-status">A chave atual nunca é exibida.</p>
+    <form id="linear-key-form"><label for="linear-api-key">Linear API key</label><input id="linear-api-key" name="api_key" type="password" autocomplete="new-password" maxlength="512" placeholder="lin_api_…"><p>Informe uma chave para configurar ou trocar. Deixe vazio para removê-la. Ao salvar, o serviço reinicia para aplicar a alteração.</p><button type="submit">Salvar chave do Linear</button></form>
+  </section>
   <div class="grid">
     <section><h2 id="project-form-title">Cadastrar projeto</h2>
       <form id="project-form"><input type="hidden" name="id"><div class="fields">
@@ -192,10 +206,11 @@ const adminHtml = `<!doctype html>
     <section><h2>Vincular contato ou grupo</h2>
       <form id="conversation-form"><div class="fields">
         <div><label>Provedor WhatsApp</label><select name="provider"><option value="waha">WAHA</option><option value="evolution">Evolution API</option></select></div>
-        <div><label>Instância / sessão</label><input name="instance" required></div>
-        <div><label>Conversa JID</label><input name="remote_jid" placeholder="5511999999999@c.us ou ...@g.us" required></div>
+        <div><label>Instância / sessão</label><input name="instance" value="${config.wahaSession}" placeholder="sessão WAHA ou nome da instância Evolution" required></div>
+        <div class="wide"><label>Escolher contato ou grupo da conta conectada</label><div class="actions"><select id="waha-chat"><option value="">Carregue as conversas do WhatsApp…</option></select><button type="button" id="waha-chats-refresh" class="secondary">Carregar conversas</button></div><p id="waha-chats-hint">A lista só é consultada na sessão conectada. Também é possível informar o JID manualmente.</p></div>
+        <div><label>Conversa JID</label><input name="remote_jid" id="conversation-jid" placeholder="Selecione acima ou informe 5511999999999@c.us" required></div>
         <div><label>Nome para exibição (opcional)</label><input name="display_name"></div>
-        <div class="wide"><label>IDs dos projetos (separe por vírgula)</label><input name="project_ids" placeholder="1, 2" required></div>
+        <div class="wide"><label>Projetos relacionados (selecione um ou mais)</label><select id="conversation-projects" multiple required size="5"></select><p>Segure Ctrl (Windows/Linux) ou Command (macOS) para selecionar vários projetos.</p></div>
       </div><p><button type="submit">Vincular conversa</button></p></form>
     </section>
   </div>
@@ -208,27 +223,43 @@ const adminHtml = `<!doctype html>
 <script>
 const $ = (selector) => document.querySelector(selector);
 let state = null;
+let wahaChats = [];
+let previousWahaStatus = '';
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 function notify(text, error=false){const node=$('#notice');node.textContent=text;node.style.display='block';node.style.background=error?'#922f2f':'#176b4d';setTimeout(()=>node.style.display='none',4500)}
 async function api(path, method='GET', body){const response=await fetch('/admin/api'+path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||('HTTP '+response.status));return data}
 function pill(text, mode=''){return '<span class="pill '+mode+'">'+esc(text)+'</span>'}
 function statusCards(i){const cards=[['PostgreSQL',i.database],['Codex · interpretação',i.interpreter.state+' · '+i.interpreter.model],['Whisper.cpp · áudio',i.transcription.state+' · '+i.transcription.model],['Linear',i.linear.configured?'chave configurada':'sem chave'],['Codex CLI',i.codex.installed?i.codex.detail:'não instalado'],['WAHA',i.whatsapp.waha.webhookConfigured?'webhook com HMAC':'HMAC não configurado'],['Evolution API',i.whatsapp.evolution.webhookConfigured?'token configurado':'token não configurado']];$('#status').innerHTML=cards.map(([label,value])=>'<div class="stat"><span>'+esc(label)+'</span><b>'+esc(value)+'</b></div>').join('')+'<div class="stat"><span>Último webhook WAHA</span><b>'+esc(i.whatsapp.waha.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Último webhook Evolution</span><b>'+esc(i.whatsapp.evolution.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Interpretação</span><b>'+esc(i.interpreter.detail)+'</b></div>'+'<div class="stat"><span>Transcrição</span><b>'+esc(i.transcription.detail)+'</b></div>'}
 function render(){const s=state;statusCards(s.integrations);
+  const selectedProjects=new Set(Array.from($('#conversation-projects').selectedOptions).map(option=>option.value));
+  $('#conversation-projects').innerHTML=s.projects.filter(p=>p.active).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+' (#'+esc(p.id)+')</option>').join('');
+  for(const option of $('#conversation-projects').options)option.selected=selectedProjects.has(option.value);
   $('#projects').innerHTML=s.projects.length?s.projects.map(p=>'<div class="row"><div class="row-main"><strong>'+esc(p.name)+' '+(p.active?pill('ativo'):pill('pausado','warn'))+'</strong><div class="meta">'+esc(p.repository_path)+' · branch '+esc(p.reference_branch)+' · '+p.conversation_count+' conversas · '+p.demand_count+' demandas</div><div class="meta">Linear team: '+esc(p.linear_team_id||'não definido')+' · project: '+esc(p.linear_project_id||'não definido')+'</div></div><div class="actions"><button class="small secondary" onclick="editProject('+p.id+')">Editar</button></div></div>').join(''):'<p>Nenhum projeto cadastrado.</p>';
-  $('#conversations').innerHTML=s.conversations.length?s.conversations.map(c=>'<div class="row"><div class="row-main"><strong>'+esc(c.display_name||c.remote_jid)+' '+pill(c.provider)+'</strong><div class="meta">'+esc(c.instance)+' · '+esc(c.remote_jid)+' · projetos: '+esc((c.projects||[]).map(p=>p.name+' (#'+p.id+')').join(', '))+'</div><div class="meta">Último webhook: '+esc(c.last_webhook_at||'nenhum')+'</div></div><button class="small danger" onclick="unmonitor('+c.id+')">Parar monitoramento</button></div>').join(''):'<p>Nenhuma conversa vinculada.</p>';
+  $('#conversations').innerHTML=s.conversations.length?s.conversations.map(c=>'<div class="row"><div class="row-main"><strong>'+esc(c.display_name||c.remote_jid)+' '+pill(c.provider)+'</strong><div class="meta">'+esc(c.instance)+' · '+esc(c.remote_jid)+' · projetos: '+esc((c.projects||[]).map(p=>p.name+' (#'+p.id+')').join(', '))+'</div><div class="meta">Último webhook: '+esc(c.last_webhook_at||'nenhum')+'</div></div><div class="actions"><button class="small secondary" onclick="editConversation('+c.id+')">Editar vínculo</button><button class="small danger" onclick="unmonitor('+c.id+')">Parar monitoramento</button></div></div>').join(''):'<p>Nenhuma conversa vinculada.</p>';
   $('#demands').innerHTML=s.demands.length?s.demands.map(d=>'<div class="row"><div class="row-main"><strong>'+esc(d.title)+' '+pill(d.status,d.status==='pending_context'?'warn':d.status==='cancelled'?'bad':'')+'</strong><div class="meta">'+esc(d.project_name)+' · '+esc(d.demand_type)+' · versão '+d.version+' · Linear: '+esc(d.linear_sync_status)+(d.codex_status?' · Codex: '+esc(d.codex_status):'')+'</div><p>'+esc(d.summary)+'</p>'+(d.linear_issue_url?'<div class="meta"><a href="'+esc(d.linear_issue_url)+'" target="_blank" rel="noreferrer">'+esc(d.linear_issue_identifier||'Abrir no Linear')+'</a></div>':'')+(d.linear_error?'<div class="meta">Erro Linear: '+esc(d.linear_error)+'</div>':'')+(d.codex_error?'<div class="meta">Erro Codex: '+esc(d.codex_error)+'</div>':'')+'<details><summary>Requisitos e critérios</summary><pre>'+esc(JSON.stringify({requirements:d.requirements,acceptanceCriteria:d.acceptance_criteria,openQuestions:d.open_questions},null,2))+'</pre></details>'+(d.technical_analysis?'<details><summary>Análise técnica · commit '+esc(d.repository_commit||'')+'</summary><pre>'+esc(d.technical_analysis)+'</pre></details>':d.codex_result?'<details><summary>Resultado Codex</summary><pre>'+esc(d.codex_result)+'</pre></details>':'')+'</div><div class="actions">'+(d.linear_sync_status==='error'?'<button class="small secondary" onclick="retryDemand('+d.id+',\'linear\')">Tentar Linear</button>':'')+(d.codex_status==='failed'?'<button class="small secondary" onclick="retryDemand('+d.id+',\'codex\')">Tentar Codex</button>':'')+'</div></div>').join(''):'<p>Nenhuma demanda identificada.</p>';
   $('#batches').innerHTML=s.batches.length?s.batches.map(b=>'<div class="row"><div class="row-main"><strong>Lote #'+b.id+' '+pill(b.status,b.status==='failed'?'bad':b.status==='processing'?'warn':'')+'</strong><div class="meta">'+esc(b.provider)+' · '+esc(b.instance)+' · '+esc(b.display_name||b.remote_jid)+' · '+b.message_count+' mensagens · '+b.audio_pending+' áudios pendentes</div><div class="meta">Primeira: '+esc(b.first_received_at)+' · última: '+esc(b.last_received_at)+' · pronto: '+esc(b.process_after)+' · tentativas: '+b.attempts+'</div>'+(b.last_error?'<div class="meta">'+esc(b.last_error)+'</div>':'')+'</div>'+(b.status==='failed'?'<button class="small secondary" onclick="retryBatch('+b.id+')">Reprocessar lote</button>':'')+'</div>').join(''):'<p>Nenhum lote pendente.</p>';
   $('#errors').innerHTML=s.errors.length?s.errors.map(e=>'<div class="row"><div class="row-main"><strong>'+esc(e.subsystem)+' · '+esc(e.created_at)+'</strong><div class="meta">'+esc(e.message)+'</div></div></div>').join(''):'<p>Nenhum erro recente.</p>';
 }
 async function refresh(){try{state=await api('/overview');render()}catch(error){notify(error.message,true)}}
+function statusLabel(status){const labels={WORKING:'Conectado',SCAN_QR_CODE:'Aguardando leitura do QR',STARTING:'Iniciando',STOPPED:'Desconectado',FAILED:'Falha',NOT_CREATED:'Ainda não pareado',NOT_CONFIGURED:'WAHA não configurado',ERROR:'Erro ao acessar WAHA'};return labels[status]||status}
+async function refreshWahaChats(){try{const result=await api('/waha/chats');wahaChats=result.chats||[];const select=$('#waha-chat');const selected=select.value;select.innerHTML='<option value="">Selecione um contato ou grupo…</option>'+wahaChats.map(chat=>'<option value="'+esc(chat.id)+'">'+esc(chat.kind==='group'?'Grupo':'Contato')+' · '+esc(chat.name)+' · '+esc(chat.id)+'</option>').join('');if(wahaChats.some(chat=>chat.id===selected))select.value=selected;$('#waha-chats-hint').textContent=wahaChats.length?'Conversas disponíveis: '+wahaChats.length+'. A seleção preenche o JID abaixo; ela só passa a ser monitorada após salvar o vínculo.':'Nenhum contato ou grupo foi encontrado. Você pode informar o JID manualmente.'}catch(error){$('#waha-chats-hint').textContent=error.message}}
+async function refreshWaha(){try{const w=await api('/waha/connection');const mode=w.status==='WORKING'?'':w.status==='ERROR'?'bad':'warn';$('#waha-status').innerHTML=pill(statusLabel(w.status),mode)+' '+esc(w.detail);$('#waha-account').textContent=w.account?('Conta: '+w.account):'';const qr=$('#waha-qr');if(w.qrDataUrl){qr.src=w.qrDataUrl;qr.hidden=false}else{qr.removeAttribute('src');qr.hidden=true}$('#waha-connect').disabled=!w.configured||w.status==='WORKING'||w.status==='STARTING';$('#waha-connect').textContent=w.status==='SCAN_QR_CODE'?'Atualizar QR':w.status==='WORKING'?'Número conectado':'Conectar número / gerar QR';if(w.status==='WORKING'&&previousWahaStatus!=='WORKING')await refreshWahaChats();$('#waha-chat').disabled=$('#conversation-form').elements.provider.value!=='waha'||w.status!=='WORKING';previousWahaStatus=w.status}catch(error){$('#waha-status').textContent='Não foi possível consultar o WAHA: '+error.message}}
+$('#waha-connect').addEventListener('click',async()=>{const button=$('#waha-connect');button.disabled=true;try{await api('/waha/connect','POST',{});notify('Sessão iniciada. O QR aparecerá quando estiver pronto.');await refreshWaha()}catch(error){notify(error.message,true)}finally{button.disabled=false}});
+$('#waha-refresh').addEventListener('click',refreshWaha);
+$('#waha-chats-refresh').addEventListener('click',refreshWahaChats);
+$('#conversation-form').elements.provider.addEventListener('change',()=>{$('#waha-chat').disabled=$('#conversation-form').elements.provider.value!=='waha'||previousWahaStatus!=='WORKING'});
+$('#waha-chat').addEventListener('change',()=>{const chat=wahaChats.find(item=>item.id===$('#waha-chat').value);if(!chat)return;$('#conversation-jid').value=chat.id;$('#conversation-form').elements.display_name.value=chat.name});
+$('#conversation-jid').addEventListener('input',()=>{if($('#conversation-jid').value!==$('#waha-chat').value)$('#waha-chat').value=''});
+$('#linear-key-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const api_key=form.elements.api_key.value;try{const result=await api('/settings/linear','POST',{api_key});form.reset();notify(result.restartScheduled?'Chave salva. O serviço está reiniciando para aplicar a configuração.':'Chave salva; reinicie o serviço para aplicar a configuração.');if(!result.restartScheduled)await refresh()}catch(error){notify(error.message,true)}});
 window.editProject=(id)=>{const p=state.projects.find(item=>item.id===id);if(!p)return;const form=$('#project-form');form.elements.id.value=p.id;form.elements.name.value=p.name;form.elements.description.value=p.description;form.elements.repository_path.value=p.repository_path;form.elements.reference_branch.value=p.reference_branch;form.elements.linear_team_id.value=p.linear_team_id;form.elements.linear_project_id.value=p.linear_project_id;form.elements.analysis_instructions.value=p.analysis_instructions;$('#project-form-title').textContent='Editar projeto #'+id;$('#cancel-edit').hidden=false;window.scrollTo({top:0,behavior:'smooth'})};
+window.editConversation=(id)=>{const c=state.conversations.find(item=>item.id===id);if(!c)return;const form=$('#conversation-form');form.elements.provider.value=c.provider;form.elements.instance.value=c.instance;form.elements.remote_jid.value=c.remote_jid;form.elements.display_name.value=c.display_name||'';const ids=new Set((c.projects||[]).map(project=>String(project.id)));for(const option of $('#conversation-projects').options)option.selected=ids.has(option.value);$('#conversation-form').scrollIntoView({behavior:'smooth',block:'center'})};
 window.unmonitor=async(id)=>{if(!confirm('Parar de observar esta conversa?'))return;try{await api('/conversations/'+id,'DELETE');notify('Monitoramento removido; histórico preservado.');await refresh()}catch(e){notify(e.message,true)}};
 window.retryDemand=async(id,kind)=>{try{await api('/demands/'+id+'/retry-'+kind,'POST',{});notify('Job agendado.');await refresh()}catch(e){notify(e.message,true)}};
 window.retryBatch=async(id)=>{try{await api('/batches/'+id+'/retry','POST',{});notify('Lote reprocessado.');await refresh()}catch(e){notify(e.message,true)}};
 $('#project-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const data=Object.fromEntries(new FormData(form).entries());const id=data.id;delete data.id;try{await api(id?'/projects/'+id:'/projects',id?'PUT':'POST',data);form.reset();form.elements.reference_branch.value='main';$('#project-form-title').textContent='Cadastrar projeto';$('#cancel-edit').hidden=true;notify('Projeto salvo.');await refresh()}catch(e){notify(e.message,true)}});
 $('#cancel-edit').addEventListener('click',()=>{const form=$('#project-form');form.reset();form.elements.reference_branch.value='main';$('#project-form-title').textContent='Cadastrar projeto';$('#cancel-edit').hidden=true});
-$('#conversation-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const data=Object.fromEntries(new FormData(form).entries());data.project_ids=String(data.project_ids).split(',').map(value=>Number(value.trim())).filter(Number.isSafeInteger);try{await api('/conversations','POST',data);form.reset();notify('Conversa vinculada e monitoramento ativado.');await refresh()}catch(e){notify(e.message,true)}});
-$('#refresh').addEventListener('click',refresh);refresh();setInterval(refresh,30000);
+$('#conversation-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const data=Object.fromEntries(new FormData(form).entries());data.project_ids=Array.from($('#conversation-projects').selectedOptions).map(option=>Number(option.value));try{await api('/conversations','POST',data);form.reset();form.elements.instance.value='${config.wahaSession}';wahaChats=[];$('#waha-chat').innerHTML='<option value="">Carregue as conversas do WhatsApp…</option>';notify('Conversa vinculada e monitoramento ativado.');await refresh()}catch(e){notify(e.message,true)}});
+$('#refresh').addEventListener('click',refresh);refresh();refreshWaha();setInterval(refresh,30000);setInterval(refreshWaha,5000);
 </script></body></html>`;
 
 function sendApiError(reply: FastifyReply, error: unknown) {
@@ -247,6 +278,44 @@ export function registerAdminRoutes(app: FastifyInstance): void {
     } catch (error) {
       request.log.error({ err: error }, 'admin overview failed');
       return reply.code(500).send({ error: 'Não foi possível carregar os dados administrativos' });
+    }
+  });
+
+  app.get('/admin/api/waha/connection', { preHandler: adminAuth }, async () => getWahaConnection());
+
+  app.get('/admin/api/waha/chats', { preHandler: adminAuth }, async (_request, reply) => {
+    try {
+      return { chats: await listWahaChats() };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Falha ao carregar conversas do WAHA';
+      return reply.code(503).send({ error: message.slice(0, 300) });
+    }
+  });
+
+  app.post('/admin/api/waha/connect', { preHandler: adminAuth }, async (_request, reply) => {
+    try {
+      return await connectWahaSession();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Falha ao iniciar a sessão WAHA';
+      return reply.code(503).send({ error: message.slice(0, 300) });
+    }
+  });
+
+  app.post('/admin/api/settings/linear', { preHandler: adminAuth }, async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.api_key !== 'string') return reply.code(400).send({ error: 'Informe api_key como texto' });
+    try {
+      await saveLinearApiKey(body.api_key);
+      const restartScheduled = Boolean(process.env.pm_id);
+      if (restartScheduled) {
+        reply.raw.once('finish', () => {
+          const restart = setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
+          restart.unref();
+        });
+      }
+      return { ok: true, restartScheduled };
+    } catch (error) {
+      return sendApiError(reply, error);
     }
   });
 

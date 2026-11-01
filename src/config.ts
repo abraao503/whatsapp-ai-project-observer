@@ -30,6 +30,7 @@ export const config = {
   evolutionApiKey: process.env.EVOLUTION_API_KEY ?? '',
   wahaApiUrl: process.env.WAHA_API_URL?.replace(/\/$/, '') ?? '',
   wahaApiKey: process.env.WAHA_API_KEY ?? '',
+  wahaSession: process.env.WAHA_SESSION ?? 'observer',
   codexModel: process.env.CODEX_MODEL ?? 'gpt-6-luna',
   codexInterpretationTimeoutMs: numberFromEnv('CODEX_INTERPRETATION_TIMEOUT_MS', 240_000),
   linearApiKey: process.env.LINEAR_API_KEY ?? '',
@@ -64,4 +65,7 @@ export function validateConfig(): void {
     throw new Error('BATCH_MAX_WAIT_MS deve ser >= BATCH_IDLE_MS');
   }
   if (config.codexModel !== 'gpt-6-luna') throw new Error('CODEX_MODEL deve ser exatamente gpt-6-luna');
+  if (!/^[a-zA-Z0-9._-]{1,128}$/.test(config.wahaSession)) {
+    throw new Error('WAHA_SESSION deve conter somente letras, números, ponto, sublinhado ou hífen');
+  }
 }
