@@ -63,7 +63,7 @@ export async function transcribeAudio(bytes: Buffer, mimeType: string): Promise<
 
   const directory = await mkdtemp(path.join(tmpdir(), 'whatsapp-observer-audio-'));
   const inputPath = path.join(directory, `input${audioExtension(mimeType)}`);
-  const wavPath = path.join(directory, 'input.wav');
+  const wavPath = path.join(directory, 'normalized.wav');
   const env = safeSubprocessEnvironment();
 
   try {

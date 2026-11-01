@@ -32,6 +32,11 @@ export interface LinearIssue {
   title: string;
 }
 
+interface LinearLabel {
+  id: string;
+  name: string;
+}
+
 async function graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
   if (!config.linearApiKey) throw new Error('LINEAR_API_KEY não configurada');
   const response = await fetch('https://api.linear.app/graphql', {
@@ -95,6 +100,74 @@ export function buildLinearDescription(demand: LinearDemand, project: LinearProj
   ].filter(Boolean).join('\n\n');
 }
 
+function labelsFor(demand: LinearDemand, project: LinearProject): string[] {
+  const typeLabels: Record<string, string> = {
+    feature: 'Tipo: Funcionalidade',
+    bug: 'Tipo: Bug',
+    improvement: 'Tipo: Melhoria',
+    change: 'Tipo: Alteração'
+  };
+  const type = typeLabels[demand.demandType];
+  if (!type) throw new Error(`Tipo de demanda sem label Linear: ${demand.demandType}`);
+  return [type, `Projeto: ${project.name.trim()}`];
+}
+
+async function ensureLabels(names: string[], teamId: string): Promise<LinearLabel[]> {
+  const query = `query ObserverTeamLabels($filter: IssueLabelFilter!) {
+    issueLabels(filter: $filter, first: 250) { nodes { id name } }
+  }`;
+  const filter = { team: { id: { eq: teamId } } };
+  let labels = (await graphql<{ issueLabels: { nodes: LinearLabel[] } }>(query, { filter })).issueLabels.nodes;
+  const resolved: LinearLabel[] = [];
+
+  for (const name of names) {
+    let label = labels.find((candidate) => candidate.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (!label) {
+      try {
+        const created = await graphql<{ issueLabelCreate: { success: boolean; issueLabel: LinearLabel | null } }>(
+          `mutation CreateObserverLabel($input: IssueLabelCreateInput!) {
+            issueLabelCreate(input: $input) { success issueLabel { id name } }
+          }`,
+          { input: { name, teamId } }
+        );
+        label = created.issueLabelCreate.success ? created.issueLabelCreate.issueLabel ?? undefined : undefined;
+      } catch (error) {
+        // A concurrent sync may have created the same label. Re-read before failing.
+        labels = (await graphql<{ issueLabels: { nodes: LinearLabel[] } }>(query, { filter })).issueLabels.nodes;
+        label = labels.find((candidate) => candidate.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+        if (!label) throw error;
+      }
+      if (!label) throw new Error(`Linear não confirmou criação da label ${name}`);
+      labels.push(label);
+    }
+    resolved.push(label);
+  }
+  return resolved;
+}
+
+async function syncIssueLabels(issueId: string, labels: LinearLabel[]): Promise<void> {
+  const data = await graphql<{ issue: { labels: { nodes: LinearLabel[] } } | null }>(
+    `query ObserverIssueLabels($id: String!) {
+      issue(id: $id) { labels { nodes { id name } } }
+    }`,
+    { id: issueId }
+  );
+  if (!data.issue) throw new Error(`Linear não encontrou a issue ${issueId} para aplicar labels`);
+  const expectedIds = new Set(labels.map((label) => label.id));
+  const manualLabelIds = data.issue.labels.nodes
+    .filter((label) => !/^(Tipo|Projeto): /i.test(label.name))
+    .map((label) => label.id);
+  const labelIds = [...new Set([...manualLabelIds, ...expectedIds])];
+  await graphql<{ issueUpdate: { success: boolean } }>(
+    `mutation UpdateObserverIssueLabels($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) { success }
+    }`,
+    { id: issueId, input: { labelIds } }
+  ).then((result) => {
+    if (!result.issueUpdate.success) throw new Error(`Linear não confirmou as labels da issue ${issueId}`);
+  });
+}
+
 async function findExistingIssue(
   demandId: number,
   project: LinearProject
@@ -123,6 +196,7 @@ export async function createOrUpdateIssue(
 ): Promise<LinearIssue> {
   if (!project.linearTeamId) throw new Error(`O projeto ${project.name} não tem Linear Team ID`);
   const description = buildLinearDescription(demand, project);
+  const labels = await ensureLabels(labelsFor(demand, project), project.linearTeamId);
   let issueId = demand.linearIssueId;
   if (!issueId) {
     const existing = await findExistingIssue(demand.id, project);
@@ -143,13 +217,15 @@ export async function createOrUpdateIssue(
     if (!data.issueUpdate.success || !data.issueUpdate.issue) {
       throw new Error(`Linear não confirmou atualização da demanda ${demand.id}`);
     }
+    await syncIssueLabels(issueId, labels);
     return data.issueUpdate.issue;
   }
 
   const input: Record<string, unknown> = {
     teamId: project.linearTeamId,
     title: demand.title,
-    description
+    description,
+    labelIds: labels.map((label) => label.id)
   };
   if (project.linearProjectId) input.projectId = project.linearProjectId;
   const data = await graphql<{

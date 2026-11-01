@@ -191,15 +191,40 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
   const previousLinearApiKey = process.env.LINEAR_API_KEY;
   process.env.LINEAR_API_KEY = 'local-test-key';
   const operations: Array<{ name: string; variables: Record<string, unknown> }> = [];
+  const labels: Array<{ id: string; name: string }> = [];
+  let currentIssueLabels: Array<{ id: string; name: string }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body)) as { query: string; variables: Record<string, unknown> };
+    if (request.query.includes('query ObserverTeamLabels')) {
+      operations.push({ name: 'labels', variables: request.variables });
+      return new Response(JSON.stringify({ data: { issueLabels: { nodes: labels } } }), { status: 200 });
+    }
+    if (request.query.includes('mutation CreateObserverLabel')) {
+      operations.push({ name: 'create-label', variables: request.variables });
+      const input = request.variables.input as { name: string };
+      const label = { id: `label-${labels.length + 1}`, name: input.name };
+      labels.push(label);
+      return new Response(JSON.stringify({ data: { issueLabelCreate: { success: true, issueLabel: label } } }), { status: 200 });
+    }
+    if (request.query.includes('query ObserverIssueLabels')) {
+      operations.push({ name: 'issue-labels', variables: request.variables });
+      return new Response(JSON.stringify({ data: { issue: { labels: { nodes: currentIssueLabels } } } }), { status: 200 });
+    }
+    if (request.query.includes('mutation UpdateObserverIssueLabels')) {
+      operations.push({ name: 'update-labels', variables: request.variables });
+      const input = request.variables.input as { labelIds: string[] };
+      currentIssueLabels = labels.filter((label) => input.labelIds.includes(label.id));
+      return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), { status: 200 });
+    }
     if (request.query.includes('query FindObserverIssue')) {
       operations.push({ name: 'find', variables: request.variables });
       return new Response(JSON.stringify({ data: { issues: { nodes: [] } } }), { status: 200 });
     }
     if (request.query.includes('mutation CreateObserverIssue')) {
       operations.push({ name: 'create', variables: request.variables });
+      const input = request.variables.input as { labelIds: string[] };
+      currentIssueLabels = labels.filter((label) => input.labelIds.includes(label.id));
       return new Response(JSON.stringify({
         data: { issueCreate: { success: true, issue: {
           id: 'issue-101', identifier: 'OBS-101', url: 'https://linear.local/OBS-101',
@@ -237,8 +262,12 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     const project = { name: 'Projeto de teste', linearTeamId: 'team-test', linearProjectId: 'project-test' };
     const created = await createOrUpdateIssue(initial, project);
     assert.equal(created.id, 'issue-101');
-    assert.deepEqual(operations.map((operation) => operation.name), ['find', 'create']);
-    const createdDescription = (operations[1]!.variables.input as { description: string }).description;
+    assert.ok(operations.some((operation) => operation.name === 'find'));
+    const createOperation = operations.find((operation) => operation.name === 'create')!;
+    const createInput = createOperation.variables.input as { description: string; labelIds: string[] };
+    assert.equal(createInput.labelIds.length, 2);
+    assert.deepEqual(currentIssueLabels.map((label) => label.name), ['Tipo: Funcionalidade', 'Projeto: Projeto de teste']);
+    const createdDescription = createInput.description;
     assert.match(createdDescription, /### Objetivo e escopo/);
     assert.match(createdDescription, /### Requisitos/);
     assert.match(createdDescription, /### Critérios de aceite/);
@@ -250,6 +279,7 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     const refined = {
       ...initial,
       title: 'Exportar relatórios em Excel com filtros',
+      demandType: 'bug',
       summary: 'Exportar em Excel e filtrar os dados por data e funcionário.',
       requirements: [
         'Exportar relatório no formato Excel',
@@ -259,13 +289,18 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
       conversationContext: 'Cliente confirmou Excel e acrescentou filtros de data e funcionário.',
       linearIssueId: created.id
     };
+    const manualLabel = { id: 'manual-priority', name: 'Prioridade manual' };
+    labels.push(manualLabel);
+    currentIssueLabels.push(manualLabel);
     const updated = await createOrUpdateIssue(refined, project);
     assert.equal(updated.id, created.id);
-    assert.deepEqual(operations.map((operation) => operation.name), ['find', 'create', 'update']);
-    const updateVariables = operations[2]!.variables;
+    assert.equal(operations.filter((operation) => operation.name === 'create').length, 1);
+    const updateVariables = operations.findLast((operation) => operation.name === 'update')!.variables;
     assert.equal(updateVariables.id, 'issue-101');
     assert.equal((updateVariables.input as { title: string }).title, refined.title);
     assert.match((updateVariables.input as { description: string }).description, /Filtrar por data e funcionário/);
+    assert.deepEqual(currentIssueLabels.map((label) => label.name).sort(),
+      ['Prioridade manual', 'Projeto: Projeto de teste', 'Tipo: Bug'].sort());
   } finally {
     globalThis.fetch = originalFetch;
     if (previousLinearApiKey === undefined) delete process.env.LINEAR_API_KEY;
@@ -284,11 +319,30 @@ test('Linear retry finds a card created before a simulated timeout instead of cr
     title: 'Exportar histórico',
     description: ''
   };
+  const labels: Array<{ id: string; name: string }> = [];
+  let currentIssueLabels: Array<{ id: string; name: string }> = [];
   let createCalls = 0;
   let updateCalls = 0;
 
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body)) as { query: string; variables: Record<string, unknown> };
+    if (request.query.includes('query ObserverTeamLabels')) {
+      return new Response(JSON.stringify({ data: { issueLabels: { nodes: labels } } }), { status: 200 });
+    }
+    if (request.query.includes('mutation CreateObserverLabel')) {
+      const input = request.variables.input as { name: string };
+      const label = { id: `label-${labels.length + 1}`, name: input.name };
+      labels.push(label);
+      return new Response(JSON.stringify({ data: { issueLabelCreate: { success: true, issueLabel: label } } }), { status: 200 });
+    }
+    if (request.query.includes('query ObserverIssueLabels')) {
+      return new Response(JSON.stringify({ data: { issue: { labels: { nodes: currentIssueLabels } } } }), { status: 200 });
+    }
+    if (request.query.includes('mutation UpdateObserverIssueLabels')) {
+      const input = request.variables.input as { labelIds: string[] };
+      currentIssueLabels = labels.filter((label) => input.labelIds.includes(label.id));
+      return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), { status: 200 });
+    }
     if (request.query.includes('query FindObserverIssue')) {
       const found = issue.description.includes('whatsapp-ai-project-observer:demand:88');
       return new Response(JSON.stringify({ data: { issues: { nodes: found ? [issue] : [] } } }), { status: 200 });
@@ -298,6 +352,7 @@ test('Linear retry finds a card created before a simulated timeout instead of cr
       const input = request.variables.input as { title: string; description: string };
       issue.title = input.title;
       issue.description = input.description;
+      currentIssueLabels = labels;
       throw new Error('timeout depois de gravar a issue no servidor');
     }
     if (request.query.includes('mutation UpdateObserverIssue')) {

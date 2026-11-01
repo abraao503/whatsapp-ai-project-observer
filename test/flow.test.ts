@@ -82,6 +82,8 @@ process.stdin.on('end', async () => {
   process.env.CODEX_HOME = fixtureDirectory;
 
   const calls: Array<{ service: 'linear'; operation: string; body: Record<string, unknown> }> = [];
+  const linearLabels: Array<{ id: string; name: string }> = [];
+  let issueLabels: Array<{ id: string; name: string }> = [];
   const originalFetch = globalThis.fetch;
   let worker: { stop: () => void } | undefined;
   let app: import('fastify').FastifyInstance | undefined;
@@ -97,13 +99,32 @@ process.stdin.on('end', async () => {
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     if (url === 'https://api.linear.app/graphql') {
       const query = String(body.query);
+      if (query.includes('query ObserverTeamLabels')) {
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: linearLabels } } }), { status: 200 });
+      }
+      if (query.includes('mutation CreateObserverLabel')) {
+        const input = (body.variables as { input: { name: string } }).input;
+        const label = { id: `label-${linearLabels.length + 1}`, name: input.name };
+        linearLabels.push(label);
+        return new Response(JSON.stringify({ data: { issueLabelCreate: { success: true, issueLabel: label } } }), { status: 200 });
+      }
+      if (query.includes('query ObserverIssueLabels')) {
+        return new Response(JSON.stringify({ data: { issue: { labels: { nodes: issueLabels } } } }), { status: 200 });
+      }
+      if (query.includes('mutation UpdateObserverIssueLabels')) {
+        const input = (body.variables as { input: { labelIds: string[] } }).input;
+        issueLabels = linearLabels.filter((label) => input.labelIds.includes(label.id));
+        calls.push({ service: 'linear', operation: 'labels-update', body });
+        return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), { status: 200 });
+      }
       if (query.includes('query FindObserverIssue')) {
         calls.push({ service: 'linear', operation: 'find', body });
         return new Response(JSON.stringify({ data: { issues: { nodes: [] } } }), { status: 200 });
       }
       if (query.includes('mutation CreateObserverIssue')) {
         calls.push({ service: 'linear', operation: 'create', body });
-        const input = body.variables as { input: { title: string } };
+        const input = body.variables as { input: { title: string; labelIds: string[] } };
+        issueLabels = linearLabels.filter((label) => input.input.labelIds.includes(label.id));
         return new Response(JSON.stringify({ data: { issueCreate: { success: true, issue: {
           id: 'local-issue-42', identifier: 'OBS-42', url: 'https://linear.local/OBS-42', title: input.input.title
         } } } }), { status: 200 });
@@ -166,11 +187,12 @@ process.stdin.on('end', async () => {
     await db.pool.query('DELETE FROM conversations WHERE id = $1', [recoveryConversationId]);
     recoveryConversationId = undefined;
 
+    const projectName = `Fluxo de teste ${Date.now()}`;
     const projects = await db.pool.query<{ id: number }>(
       `INSERT INTO projects(name, description, repository_path, reference_branch, linear_team_id, linear_project_id)
        VALUES ($1, $2, '/tmp/observer-test-repository-does-not-exist', 'main', 'team-local', 'project-local')
        RETURNING id`,
-      [`Fluxo de teste ${Date.now()}`, 'Projeto temporário de validação']
+      [projectName, 'Projeto temporário de validação']
     );
     projectId = projects.rows[0]!.id;
     const conversations = await db.pool.query<{ id: number }>(
@@ -253,6 +275,8 @@ process.stdin.on('end', async () => {
     assert.ok(firstDemand);
     assert.equal(firstDemand.version, 2);
     assert.ok(calls.some((call) => call.service === 'linear' && call.operation === 'create'));
+    assert.deepEqual(issueLabels.map((label) => label.name).sort(),
+      ['Tipo: Funcionalidade', `Projeto: ${projectName}`].sort());
 
     const updatedDemand = await waitFor(async () => {
       const result = await db!.pool.query<{

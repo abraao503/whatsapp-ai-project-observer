@@ -13,7 +13,13 @@ test('transcribes locally with whisper.cpp in Portuguese without calling an API'
   await writeFile(modelPath, 'fixture-model');
   await writeFile(ffmpeg, `#!/usr/bin/env node
 const fs = require('node:fs');
-const output = process.argv.at(-1);
+const args = process.argv.slice(2);
+const input = args[args.indexOf('-i') + 1];
+const output = args.at(-1);
+if (input === output) {
+  console.error('Output is the same as input');
+  process.exit(234);
+}
 fs.writeFileSync(output, 'fixture wav');
 `);
   await writeFile(whisper, `#!/usr/bin/env node
@@ -44,6 +50,8 @@ console.log('model: gpt-6-luna');
     const { transcribeAudio } = await import('../src/modules/transcription.js');
     const transcript = await transcribeAudio(Buffer.from('fixture audio'), 'audio/ogg; codecs=opus');
     assert.equal(transcript, 'Precisamos permitir exportar o relatório em CSV.');
+    const wavTranscript = await transcribeAudio(Buffer.from('fixture audio'), 'audio/wav');
+    assert.equal(wavTranscript, 'Precisamos permitir exportar o relatório em CSV.');
     const args = (await readFile(argsPath, 'utf8')).split('\n');
     assert.ok(args.includes('--language'));
     assert.equal(args[args.indexOf('--language') + 1], 'pt');
