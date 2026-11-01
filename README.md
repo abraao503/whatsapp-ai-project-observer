@@ -140,7 +140,7 @@ Os cards usam um modelo editorial curto: objetivo/escopo, requisitos, critérios
 
 ### Codex CLI
 
-Instale e autentique o Codex CLI para o mesmo usuário que executa a aplicação no PM2. Se o binário não estiver no `PATH` desse usuário, defina `CODEX_CLI` com seu caminho completo. O worker cria um snapshot do commit configurado via `git archive` e executa `codex exec` em modo não interativo, com sandbox read-only, saída temporária e timeout. O CLI recebe o snapshot, não o repositório gravável; não executa comandos originados de conversas. `REPOSITORY_ROOTS` é obrigatório para cadastrar repositórios.
+Instale e autentique o Codex CLI para o mesmo usuário que executa a aplicação no PM2. Se o binário não estiver no `PATH` desse usuário, defina `CODEX_CLI` com seu caminho completo. O worker verifica atualizações no GitHub a cada `REPOSITORY_SYNC_INTERVAL_MS` (padrão: 5 minutos) e também antes de cada análise. Só aplica fast-forward na branch configurada quando o clone está limpo; alterações locais, divergências ou falhas de acesso ficam registradas e não são sobrescritas. Se o caminho configurado contiver repositórios Git em pastas diretas, o worker cria um snapshot separado de cada um e o Codex analisa todos no mesmo contexto, registrando o commit considerado em cada repositório. O Codex recebe snapshots via `git archive`, em modo não interativo, sandbox read-only, saída temporária e timeout; não recebe os diretórios graváveis nem executa comandos originados de conversas. `REPOSITORY_ROOTS` é obrigatório para cadastrar repositórios.
 
 ### WAHA próprio na VPS
 

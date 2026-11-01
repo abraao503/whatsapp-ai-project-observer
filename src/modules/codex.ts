@@ -31,6 +31,14 @@ interface RepositorySnapshotTarget {
   commit: string;
 }
 
+export interface RepositorySyncResult {
+  name: string;
+  path: string;
+  status: 'updated' | 'current' | 'ahead';
+  previousCommit: string;
+  currentCommit: string;
+}
+
 let cachedCliStatus: { checkedAt: number; installed: boolean; detail: string } | null = null;
 
 export function codexCliStatus(): { installed: boolean; detail: string } {
@@ -206,7 +214,7 @@ async function hasGitMetadata(repositoryPath: string): Promise<boolean> {
   }
 }
 
-async function repositoriesInContext(contextPath: string): Promise<Array<{ name: string; path: string }>> {
+export async function repositoriesInContext(contextPath: string): Promise<Array<{ name: string; path: string }>> {
   if (await hasGitMetadata(contextPath)) {
     return [{ name: path.basename(contextPath), path: contextPath }];
   }
@@ -227,6 +235,98 @@ async function repositoriesInContext(contextPath: string): Promise<Array<{ name:
     throw new Error('O caminho deve ser um repositório Git ou conter repositórios Git em pastas diretas');
   }
   return repositories;
+}
+
+function repositoryGitEnvironment(): NodeJS.ProcessEnv {
+  const allowed = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'GIT_SSH_COMMAND'];
+  return {
+    ...Object.fromEntries(allowed.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : [])),
+    GIT_TERMINAL_PROMPT: '0'
+  };
+}
+
+const repositorySyncs = new Map<string, Promise<RepositorySyncResult>>();
+
+async function synchronizeRepository(
+  repository: { name: string; path: string },
+  referenceBranch: string
+): Promise<RepositorySyncResult> {
+  const syncKey = `${repository.path}\0${referenceBranch}`;
+  const existing = repositorySyncs.get(syncKey);
+  if (existing) return existing;
+
+  const task = (async (): Promise<RepositorySyncResult> => {
+    const git = (args: string[], timeoutMs = 30_000) => runCaptured(
+      'git', ['-C', repository.path, ...args], { timeoutMs, env: repositoryGitEnvironment() }
+    );
+    const { stdout: remoteOutput } = await git(['remote', 'get-url', 'origin']);
+    const remote = remoteOutput.trim();
+    if (!/^(?:git@github\.com:|https:\/\/github\.com\/)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(remote)) {
+      throw new Error(`Pull ignorado em ${repository.name}: origin não é um repositório GitHub permitido`);
+    }
+    const { stdout: branchOutput } = await git(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    if (branchOutput.trim() !== referenceBranch) {
+      throw new Error(`Pull ignorado em ${repository.name}: branch atual diferente de ${referenceBranch}`);
+    }
+    const { stdout: statusOutput } = await git(['status', '--porcelain', '--untracked-files=normal']);
+    if (statusOutput.trim()) {
+      throw new Error(`Pull ignorado em ${repository.name}: existem alterações locais não commitadas`);
+    }
+    const { stdout: currentOutput } = await git(['rev-parse', '--verify', 'HEAD']);
+    const previousCommit = currentOutput.trim();
+    const remoteRef = `refs/remotes/origin/${referenceBranch}`;
+    await git(['fetch', '--prune', 'origin', `+refs/heads/${referenceBranch}:${remoteRef}`], 120_000);
+    const { stdout: remoteHeadOutput } = await git(['rev-parse', '--verify', remoteRef]);
+    const remoteCommit = remoteHeadOutput.trim();
+    const { stdout: countOutput } = await git(['rev-list', '--left-right', '--count', `HEAD...${remoteRef}`]);
+    const counts = countOutput.trim().split(/\s+/);
+    if (counts.length !== 2) throw new Error(`Git retornou estado inválido em ${repository.name}`);
+    const ahead = Number(counts[0]!);
+    const behind = Number(counts[1]!);
+    if (!Number.isSafeInteger(ahead) || !Number.isSafeInteger(behind)) {
+      throw new Error(`Git retornou estado inválido em ${repository.name}`);
+    }
+    if (ahead > 0 && behind > 0) {
+      throw new Error(`Pull ignorado em ${repository.name}: branch local e origin/${referenceBranch} divergiram`);
+    }
+    if (behind === 0) {
+      return {
+        name: repository.name,
+        path: repository.path,
+        status: ahead > 0 ? 'ahead' : 'current',
+        previousCommit,
+        currentCommit: previousCommit
+      };
+    }
+    await git(['-c', 'core.hooksPath=/dev/null', 'merge', '--ff-only', remoteRef], 30_000);
+    const { stdout: updatedOutput } = await git(['rev-parse', '--verify', 'HEAD']);
+    const currentCommit = updatedOutput.trim();
+    if (currentCommit !== remoteCommit) throw new Error(`Fast-forward não chegou ao commit remoto em ${repository.name}`);
+    return { name: repository.name, path: repository.path, status: 'updated', previousCommit, currentCommit };
+  })();
+
+  repositorySyncs.set(syncKey, task);
+  try {
+    return await task;
+  } finally {
+    if (repositorySyncs.get(syncKey) === task) repositorySyncs.delete(syncKey);
+  }
+}
+
+export async function updateRepositoryContext(
+  repositoryPath: string,
+  referenceBranch: string
+): Promise<RepositorySyncResult[]> {
+  const contextPath = await validateRepositoryPath(repositoryPath);
+  const branch = referenceBranch.trim();
+  if (!branch || branch.startsWith('-')) throw new Error('Branch de referência inválida');
+  await runCaptured('git', ['check-ref-format', '--branch', branch], { timeoutMs: 10_000 });
+  const repositories = await repositoriesInContext(contextPath);
+  const results: RepositorySyncResult[] = [];
+  for (const repository of repositories) {
+    results.push(await synchronizeRepository(repository, branch));
+  }
+  return results;
 }
 
 async function validateSnapshotSymlinks(root: string): Promise<void> {
@@ -261,6 +361,7 @@ export async function analyzeRepository(task: CodexTask): Promise<CodexAnalysis>
   const contextPath = await validateRepositoryPath(task.repositoryPath);
   const ref = task.referenceBranch.trim();
   if (!ref || ref.startsWith('-')) throw new Error('Branch de referência inválida');
+  await updateRepositoryContext(contextPath, ref);
   const repositories: RepositorySnapshotTarget[] = [];
   for (const repository of await repositoriesInContext(contextPath)) {
     await runCaptured('git', ['-C', repository.path, 'check-ref-format', '--branch', ref], { timeoutMs: 10_000 });

@@ -2,7 +2,7 @@ import { config } from '../config.js';
 import { inTransaction, pool, recordError, safeErrorMessage } from '../db/index.js';
 import { retryDelayMs } from '../batching.js';
 import { processBatchInterpretation } from '../modules/demands.js';
-import { analyzeRepository, type CodexTask } from '../modules/codex.js';
+import { analyzeRepository, updateRepositoryContext, type CodexTask } from '../modules/codex.js';
 import { createOrUpdateIssue, type LinearDemand, type LinearProject } from '../modules/linear.js';
 import { interpreterStatus, validateCodexAccess } from '../modules/interpreter.js';
 
@@ -367,6 +367,52 @@ export function startWorker(): { stop: () => void } {
   let activeLinear = false;
   let lastCodexValidation = Date.now();
   let lastCleanup = 0;
+  let repositorySyncBusy = false;
+  const repositorySyncNotices = new Map<string, string>();
+
+  const syncRepositories = async () => {
+    if (repositorySyncBusy || stopping) return;
+    repositorySyncBusy = true;
+    try {
+      const projects = await pool.query<{ repository_path: string; reference_branch: string }>(
+        'SELECT DISTINCT repository_path, reference_branch FROM projects WHERE active = true'
+      );
+      for (const project of projects.rows) {
+        try {
+          const results = await updateRepositoryContext(project.repository_path, project.reference_branch);
+          repositorySyncNotices.delete(project.repository_path);
+          for (const result of results) {
+            if (result.status === 'updated') {
+              repositorySyncNotices.delete(result.path);
+              console.info(`[repository-sync] ${result.name}: ${result.previousCommit.slice(0, 8)} -> ${result.currentCommit.slice(0, 8)}`);
+            } else if (result.status === 'ahead') {
+              const notice = `A branch local está à frente de origin/${project.reference_branch}`;
+              if (repositorySyncNotices.get(result.path) !== notice) {
+                repositorySyncNotices.set(result.path, notice);
+                console.warn(`[repository-sync] ${result.name}: ${notice}`);
+              }
+            } else {
+              repositorySyncNotices.delete(result.path);
+            }
+          }
+        } catch (error) {
+          const notice = safeErrorMessage(error);
+          if (repositorySyncNotices.get(project.repository_path) !== notice) {
+            repositorySyncNotices.set(project.repository_path, notice);
+            await recordError('repository-sync', error, { repositoryPath: project.repository_path });
+          }
+        }
+      }
+    } catch (error) {
+      const notice = safeErrorMessage(error);
+      if (repositorySyncNotices.get('worker') !== notice) {
+        repositorySyncNotices.set('worker', notice);
+        await recordError('repository-sync', error);
+      }
+    } finally {
+      repositorySyncBusy = false;
+    }
+  };
 
   const runBatch = async (batch: ClaimedBatch) => {
     activeBatches += 1;
@@ -427,11 +473,14 @@ export function startWorker(): { stop: () => void } {
   };
 
   const timer = setInterval(() => { void tick(); }, config.workerPollMs);
+  const repositorySyncTimer = setInterval(() => { void syncRepositories(); }, config.repositorySyncIntervalMs);
   void tick();
+  void syncRepositories();
   return {
     stop: () => {
       stopping = true;
       clearInterval(timer);
+      clearInterval(repositorySyncTimer);
     }
   };
 }

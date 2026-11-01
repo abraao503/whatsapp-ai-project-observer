@@ -2,9 +2,13 @@ import { config as loadDotenv } from 'dotenv';
 import path from 'node:path';
 
 const envFile = loadDotenv({ path: path.resolve(process.cwd(), '.env') }).parsed;
-// Linear's key is editable from the admin panel. Prefer its persisted .env value
-// over a stale copy retained by PM2 when it respawns the process.
+// These settings are persisted in .env. Prefer them over stale copies retained
+// by PM2 when it respawns the process.
 if (envFile?.LINEAR_API_KEY !== undefined) process.env.LINEAR_API_KEY = envFile.LINEAR_API_KEY;
+if (envFile?.REPOSITORY_ROOTS !== undefined) process.env.REPOSITORY_ROOTS = envFile.REPOSITORY_ROOTS;
+if (envFile?.REPOSITORY_SYNC_INTERVAL_MS !== undefined) {
+  process.env.REPOSITORY_SYNC_INTERVAL_MS = envFile.REPOSITORY_SYNC_INTERVAL_MS;
+}
 
 function numberFromEnv(name: string, fallback: number, minimum = 1): number {
   const raw = process.env[name];
@@ -58,6 +62,7 @@ export const config = {
   batchMaxAttempts: numberFromEnv('BATCH_MAX_ATTEMPTS', 8),
   maxParallelBatches: numberFromEnv('MAX_PARALLEL_BATCHES', 2),
   codexConcurrency: numberFromEnv('CODEX_CONCURRENCY', 1),
+  repositorySyncIntervalMs: numberFromEnv('REPOSITORY_SYNC_INTERVAL_MS', 300_000, 60_000),
   workerPollMs: numberFromEnv('WORKER_POLL_MS', 1_000),
   messageRetentionDays: numberFromEnv('MESSAGE_RETENTION_DAYS', 365, 0),
   maxAudioBytes: numberFromEnv('MAX_AUDIO_BYTES', 25_000_000),
