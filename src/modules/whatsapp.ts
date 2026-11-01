@@ -1,5 +1,5 @@
 export type Provider = 'evolution' | 'waha';
-export type MessageKind = 'text' | 'audio' | 'media' | 'other';
+export type MessageKind = 'text' | 'audio' | 'video' | 'media' | 'other';
 
 export interface NormalizedMessage {
   provider: Provider;
@@ -14,6 +14,7 @@ export interface NormalizedMessage {
   text: string;
   media: Record<string, unknown>;
   audioBase64: string | null;
+  videoBase64: string | null;
 }
 
 export interface ParseResult {
@@ -86,8 +87,14 @@ function evolutionMessage(instance: string, item: unknown): NormalizedMessage | 
   const base64 = pickString(data.base64, message.base64, audio.base64, media.base64);
   const messageType = stringValue(data.messageType).toLowerCase();
   const isAudio = messageType.includes('audio') || Object.keys(audio).length > 0;
-  const hasMedia = isAudio || Object.keys(image).length > 0 || Object.keys(video).length > 0 ||
+  const mimeType = pickString(media.mimetype, audio.mimetype, image.mimetype, video.mimetype, document.mimetype);
+  const isVideo = !isAudio && (
+    messageType.includes('video') || mimeType.toLowerCase().startsWith('video/') || Object.keys(video).length > 0
+  );
+  const hasMedia = isAudio || isVideo || Object.keys(image).length > 0 ||
     Object.keys(document).length > 0 || Object.keys(media).length > 0;
+  const mediaDetails = { ...media };
+  delete mediaDetails.base64;
 
   return {
     provider: 'evolution',
@@ -98,16 +105,17 @@ function evolutionMessage(instance: string, item: unknown): NormalizedMessage | 
     senderJid: pickString(key.participant, key.participantAlt, data.participant),
     senderName: pickString(data.pushName, data.senderName),
     fromMe: key.fromMe === true,
-    kind: isAudio ? 'audio' : hasMedia ? 'media' : evolutionText(message) ? 'text' : 'other',
+    kind: isAudio ? 'audio' : isVideo ? 'video' : hasMedia ? 'media' : evolutionText(message) ? 'text' : 'other',
     text: evolutionText(message),
     media: {
-      ...media,
-      mimetype: pickString(media.mimetype, audio.mimetype, image.mimetype, video.mimetype, document.mimetype),
+      ...mediaDetails,
+      mimetype: mimeType,
       fileName: pickString(media.fileName, media.filename, data.fileName),
-      url: pickString(media.url, data.mediaUrl),
+      url: pickString(media.url, data.mediaUrl, audio.url, image.url, video.url, document.url),
       messageType
     },
-    audioBase64: base64 || null
+    audioBase64: isAudio ? base64 || null : null,
+    videoBase64: isVideo ? pickString(data.base64, message.base64, video.base64, media.base64) || null : null
   };
 }
 
@@ -125,6 +133,7 @@ function wahaMessage(session: string, item: unknown): NormalizedMessage | null {
   const mimetype = stringValue(media.mimetype);
   const isAudio = mimetype.toLowerCase().startsWith('audio/') ||
     /audio|ptt|voice/i.test(stringValue(payload.type));
+  const isVideo = !isAudio && (mimetype.toLowerCase().startsWith('video/') || /video/i.test(stringValue(payload.type)));
   const hasMedia = payload.hasMedia === true || Object.keys(media).length > 0;
   return {
     provider: 'waha',
@@ -135,7 +144,7 @@ function wahaMessage(session: string, item: unknown): NormalizedMessage | null {
     senderJid: pickString(payload.participant, fromMe ? from : ''),
     senderName: pickString(payload.pushName, event.me && asRecord(event.me).pushName),
     fromMe,
-    kind: isAudio ? 'audio' : hasMedia ? 'media' : stringValue(payload.body) ? 'text' : 'other',
+    kind: isAudio ? 'audio' : isVideo ? 'video' : hasMedia ? 'media' : stringValue(payload.body) ? 'text' : 'other',
     text: stringValue(payload.body),
     media: {
       url: stringValue(media.url),
@@ -143,7 +152,8 @@ function wahaMessage(session: string, item: unknown): NormalizedMessage | null {
       fileName: pickString(media.filename, media.fileName),
       hasMedia
     },
-    audioBase64: pickString(payload.base64, media.base64) || null
+    audioBase64: isAudio ? pickString(payload.base64, media.base64) || null : null,
+    videoBase64: isVideo ? pickString(payload.base64, media.base64) || null : null
   };
 }
 

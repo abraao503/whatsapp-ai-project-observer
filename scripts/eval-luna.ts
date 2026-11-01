@@ -19,6 +19,7 @@ function context(
       decisions: []
     },
     recentMessages: [],
+    videoFrames: [],
     projects: [{
       id: 1,
       name: 'Projeto sintético para avaliação',
@@ -28,6 +29,7 @@ function context(
     }],
     batchMessages: messages.map((message, index) => ({
       ...message,
+      kind: 'text',
       sentAt: new Date(Date.UTC(2026, 10, 1, 12, 0, index)).toISOString()
     }))
   };

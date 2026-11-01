@@ -51,6 +51,7 @@ async function handleWebhook(
 }
 
 export function createApp(): FastifyInstance {
+  const webhookBodyLimit = Math.max(2_000_000, Math.ceil(Math.max(config.maxAudioBytes, config.maxVideoBytes) * 1.6));
   const app = Fastify({
     logger: config.nodeEnv === 'test' ? false : {
       level: config.nodeEnv === 'production' ? 'info' : 'debug',
@@ -66,13 +67,13 @@ export function createApp(): FastifyInstance {
         }
       }
     },
-    bodyLimit: Math.max(2_000_000, Math.ceil(config.maxAudioBytes * 1.6))
+    bodyLimit: webhookBodyLimit
   });
 
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser(
     'application/json',
-    { parseAs: 'buffer', bodyLimit: Math.max(2_000_000, Math.ceil(config.maxAudioBytes * 1.6)) },
+    { parseAs: 'buffer', bodyLimit: webhookBodyLimit },
     (request, body, done) => {
       const raw = Buffer.isBuffer(body) ? body : Buffer.from(body);
       request.rawBody = raw;

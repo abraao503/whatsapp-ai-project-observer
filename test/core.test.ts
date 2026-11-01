@@ -79,6 +79,56 @@ test('WAHA voice notes are retained as audio messages', () => {
   assert.equal(parsed.messages[0]?.media.url, '/api/files/audio.ogg');
 });
 
+test('video webhook events retain captions and video bytes without classifying them as audio', () => {
+  const videoBytes = Buffer.from('video fixture');
+  const parsed = parseWebhook('waha', {
+    event: 'message.any',
+    session: 'main',
+    payload: {
+      id: 'wamid.video',
+      from: '15550000000@c.us',
+      fromMe: false,
+      type: 'video',
+      body: 'Veja o erro ao salvar o relatório',
+      hasMedia: true,
+      media: { mimetype: 'video/mp4', url: '/api/files/video.mp4', base64: videoBytes.toString('base64') }
+    }
+  });
+
+  assert.equal(parsed.messages[0]?.kind, 'video');
+  assert.equal(parsed.messages[0]?.text, 'Veja o erro ao salvar o relatório');
+  assert.equal(parsed.messages[0]?.audioBase64, null);
+  assert.deepEqual(Buffer.from(parsed.messages[0]?.videoBase64 ?? '', 'base64'), videoBytes);
+});
+
+test('Evolution video and image payloads do not place visual media in the audio field', () => {
+  const video = parseWebhook('evolution', {
+    event: 'messages.upsert',
+    instance: 'primary',
+    data: {
+      key: { remoteJid: '15550000000@s.whatsapp.net', id: 'video-1', fromMe: false },
+      message: { videoMessage: { mimetype: 'video/mp4', caption: 'Veja esta tela', base64: 'dmlkZW8=' } }
+    }
+  }).messages[0];
+  const image = parseWebhook('evolution', {
+    event: 'messages.upsert',
+    instance: 'primary',
+    data: {
+      key: { remoteJid: '15550000000@s.whatsapp.net', id: 'image-1', fromMe: false },
+      message: { imageMessage: { mimetype: 'image/jpeg', base64: 'aW1hZ2U=' } }
+    }
+  }).messages[0];
+
+  assert.equal(video?.kind, 'video');
+  assert.equal(video?.text, 'Veja esta tela');
+  assert.equal(video?.audioBase64, null);
+  assert.equal(video?.videoBase64, 'dmlkZW8=');
+  assert.equal('base64' in (video?.media ?? {}), false);
+  assert.equal(image?.kind, 'media');
+  assert.equal(image?.audioBase64, null);
+  assert.equal(image?.videoBase64, null);
+});
+
 test('Evolution messages.upsert preserves sent messages and batches array events', () => {
   const parsed = parseWebhook('evolution', {
     event: 'messages.upsert',

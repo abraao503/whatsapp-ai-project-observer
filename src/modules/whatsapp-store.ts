@@ -21,15 +21,18 @@ async function insertMessage(client: PoolClient, message: NormalizedMessage): Pr
   const row = conversation.rows[0];
   if (!row?.monitored) return 'ignored';
 
-  const rawAudio = message.audioBase64?.replace(/^data:[^,]+,/, '') ?? '';
+  const rawAudio = message.kind === 'audio' ? message.audioBase64?.replace(/^data:[^,]+,/, '') ?? '' : '';
   const audioTooLarge = rawAudio.length > config.maxAudioBytes * 1.4;
-  const audioBase64 = !audioTooLarge && /^[A-Za-z0-9+/=\r\n]+$/.test(rawAudio) ? rawAudio : null;
+  const audioBase64 = rawAudio && !audioTooLarge && /^[A-Za-z0-9+/=\r\n]+$/.test(rawAudio) ? rawAudio : null;
+  const rawVideo = message.kind === 'video' ? message.videoBase64?.replace(/^data:[^,]+,/, '') ?? '' : '';
+  const videoTooLarge = rawVideo.length > config.maxVideoBytes * 1.4;
+  const videoBase64 = rawVideo && !videoTooLarge && /^[A-Za-z0-9+/=\r\n]+$/.test(rawVideo) ? rawVideo : null;
   const inserted = await client.query<{ id: number }>(
     `INSERT INTO messages (
        conversation_id, external_message_id, sent_at, sender_jid, sender_name,
-       from_me, kind, text, media, audio_base64, transcript_status
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10,
-       CASE WHEN $7 = 'audio' THEN 'pending' ELSE 'not_required' END)
+       from_me, kind, text, media, audio_base64, video_base64, transcript_status
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
+       CASE WHEN $7 IN ('audio', 'video') THEN 'pending' ELSE 'not_required' END)
      ON CONFLICT (conversation_id, external_message_id) DO NOTHING
      RETURNING id`,
     [
@@ -41,8 +44,14 @@ async function insertMessage(client: PoolClient, message: NormalizedMessage): Pr
       message.fromMe,
       message.kind,
       message.text,
-      JSON.stringify({ ...message.media, audioPending: message.kind === 'audio' && !audioBase64 }),
-      audioBase64
+      JSON.stringify({
+        ...message.media,
+        audioPending: message.kind === 'audio' && !audioBase64,
+        videoPending: message.kind === 'video' && !videoBase64,
+        videoTooLarge
+      }),
+      audioBase64,
+      videoBase64
     ]
   );
   const messageRow = inserted.rows[0];

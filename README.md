@@ -35,11 +35,11 @@ npm test
 npm run build
 ```
 
-Os testes locais cobrem cálculo de debounce, limite do lote, backoff, normalização de eventos Evolution/WAHA, mensagens próprias e de grupos, áudio, HMAC, criação/edição e reconciliação de issue via Linear mockado, além da execução read-only do job Codex contra um CLI de teste e rejeição de symlink para fora do repositório.
+Os testes locais cobrem cálculo de debounce, limite do lote, backoff, normalização de eventos Evolution/WAHA, mensagens próprias e de grupos, áudio e vídeo, HMAC, criação/edição e reconciliação de issue via Linear mockado, além da execução read-only do job Codex contra um CLI de teste e rejeição de symlink para fora do repositório.
 
 ### Validar o fluxo local com PostgreSQL
 
-Os testes de fluxo usam um PostgreSQL local real, um Codex CLI de fixture e o endpoint GraphQL do Linear mockado. O fluxo valida criação/edição do card, webhook duplicado, mensagem própria durante uma interpretação em andamento e recuperação de lote após reinício. Os testes adicionais cobrem debounce, duplicatas que não prolongam o lote, isolamento entre conversas, mensagens fora de ordem, limite máximo de espera, abertura do próximo lote ao atingir a capacidade e preservação de áudio após falha no transcritor local.
+Os testes de fluxo usam um PostgreSQL local real, um Codex CLI de fixture e o endpoint GraphQL do Linear mockado. O fluxo valida criação/edição do card, webhook duplicado, mensagem própria durante uma interpretação em andamento e recuperação de lote após reinício. Os testes adicionais cobrem debounce, duplicatas que não prolongam o lote, isolamento entre conversas, mensagens fora de ordem, limite máximo de espera, abertura do próximo lote ao atingir a capacidade, preservação de mídia após falha e retry de vídeo sem repetir uma transcrição já persistida.
 
 Use um banco local exclusivo. Se já existir PostgreSQL local, crie nele um banco de teste separado e use a URL abaixo ajustada. Se não houver, este container descartável é opcional e restrito ao loopback:
 
@@ -96,13 +96,13 @@ Não rode o SQL se a role ou banco já existirem; confira o estado primeiro. Con
 Cadastre explicitamente cada conversa autorizada no painel `/admin`. Depois de conectar a conta WAHA, carregue os contatos/grupos, escolha a conversa e selecione um ou mais projetos relacionados; o JID continua editável para entrada manual e para Evolution. Vínculos existentes podem ser editados pela lista de conversas. A seleção no painel apenas concede monitoramento após salvar; eventos de outras conversas são descartados. O webhook só persiste a mensagem e agenda o lote; não chama IA nem Codex durante a requisição.
 
 - Evolution: configure `EVOLUTION_WEBHOOK_TOKEN` e envie os eventos `MESSAGES_UPSERT` e `SEND_MESSAGE` para `/webhooks/evolution/<token>`. Para mídia, configure a integração para incluir base64 (`webhookBase64`) ou forneça `EVOLUTION_API_URL` e chave de API compatíveis com um endpoint `/api/files/...`.
-- WAHA: o projeto usa uma instância própria em `127.0.0.1:3201`. O painel inicia a sessão `observer`, configura `message.any` com assinatura HMAC e mostra o QR/status. O Observer acessa a API pelo loopback e usa chave; mantenha a porta 3201 bloqueada para conexões externas no firewall. Mensagens não monitoradas são descartadas pelo Observer. Para baixar áudio sem base64, o processo usa a API local autenticada.
+- WAHA: o projeto usa uma instância própria em `127.0.0.1:3201`. O painel inicia a sessão `observer`, configura `message.any` com assinatura HMAC e mostra o QR/status. O Observer acessa a API pelo loopback e usa chave; mantenha a porta 3201 bloqueada para conexões externas no firewall. Mensagens não monitoradas são descartadas pelo Observer. Para baixar áudio ou vídeo sem base64, o processo usa a API local autenticada.
 
 Para conectar um número, abra `/admin`, selecione **Conectar número do WhatsApp** e escaneie o QR em WhatsApp → Dispositivos conectados. O estado da conexão e o nome/número da conta são atualizados pelo painel. A sessão fica persistida no volume `/home/ubuntu/.local/share/whatsapp-observer/waha-sessions`, inclusive após reiniciar o container. A sessão habilita o armazenamento NOWEB com sincronização histórica limitada; isso é necessário para listar contatos e grupos e não deve ser alterado depois do pareamento.
 
 Na VPS ARM64, a instância usa `devlikeapro/waha:noweb-arm-2026.10.1`, uma versão fixada do engine NOWEB. Ela roda em container Docker separado, com `--network host`, mas o servidor WAHA está configurado para escutar somente em `127.0.0.1:3201`; não publique a porta na Internet nem altere o container WAHA de outros projetos. A API key de WAHA fica hasheada no arquivo de ambiente do container; o Observer guarda a chave correspondente em `.env`, com permissões restritas.
 
-O áudio sem base64 fica preservado como transcrição pendente/falha e o lote não é apagado.
+Áudio e vídeo sem base64 ficam preservados como mídia pendente/falha e o lote não é apagado.
 
 ### Interpretação com Codex CLI
 
@@ -123,6 +123,12 @@ curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5
 ```
 
 O padrão de idioma é `pt`, o modelo `small` multilíngue quantizado é um ponto inicial equilibrado, e `WHISPER_THREADS=1` evita saturar uma VPS de 2 vCPUs. `ffmpeg` converte o áudio recebido para WAV mono 16 kHz antes da transcrição. O modelo é baixado uma vez; a inferência é local. Se faltar o binário/modelo ou a transcrição falhar, o lote registra erro e mantém o áudio armazenado para retry.
+
+### Análise de vídeo
+
+Vídeos passam pelo mesmo worker assíncrono: `ffprobe` verifica faixa e duração; `ffmpeg` extrai a faixa de áudio para o Whisper local e amostra quadros em intervalos regulares; o Codex CLI recebe as imagens com seus timestamps junto do contexto do lote. O Codex analisa quadros estáticos, não o arquivo de vídeo bruto. A amostragem é limitada para controlar tempo e custo, então movimentos muito rápidos entre quadros podem não aparecer na análise.
+
+Os limites padrão são 50 MB por vídeo, 180 segundos, até 6 quadros por vídeo e 12 quadros por lote. Ajuste `MAX_VIDEO_BYTES`, `VIDEO_MAX_DURATION_SECONDS`, `VIDEO_MAX_FRAMES_PER_MESSAGE`, `VIDEO_MAX_FRAMES_PER_BATCH` e `VIDEO_PROCESSING_TIMEOUT_MS` conforme a capacidade da máquina. `ffprobe` vem no pacote `ffmpeg`; se o executável tiver outro caminho, configure `FFPROBE_CLI`. Legenda, fala transcrita e quadros visuais são enviados juntos ao `gpt-6-luna` pelo Codex CLI. Os quadros temporários são apagados após a interpretação; o vídeo bruto fica no PostgreSQL apenas enquanto o lote precisa de retry e é removido ao concluir.
 
 ### Linear
 
@@ -193,7 +199,7 @@ Exemplo de configuração de proxy para adaptar ao server block TLS já existent
 ```nginx
 location /webhooks/evolution/ {
     access_log off;
-    client_max_body_size 40m;
+    client_max_body_size 80m;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -201,7 +207,7 @@ location /webhooks/evolution/ {
 }
 
 location / {
-    client_max_body_size 40m;
+    client_max_body_size 80m;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -224,5 +230,5 @@ Projetos e contatos são configurados no painel. Ao salvar um projeto, o caminho
 
 - O Linear, as credenciais do provedor WhatsApp e os projetos/conversas observados precisam ser configurados no ambiente de deploy. O painel e `/health` mostram o status do Codex; o acesso a `gpt-6-luna` é confirmado na primeira interpretação real, sem fallback.
 - Configure o provedor WhatsApp e os eventos que sua instalação envia; Evolution e WAHA têm parsers próprios.
-- O download de áudio de uma URL do provedor só aceita o caminho `/api/files/...` e exige que o processo alcance a API configurada.
+- O download de áudio/vídeo de uma URL do provedor só aceita o caminho `/api/files/...` e exige que o processo alcance a API configurada.
 - Os testes de fluxo com PostgreSQL exigem `TEST_DATABASE_URL`; a avaliação Luna usa quatro conversas sintéticas e a conta autenticada do Codex CLI.

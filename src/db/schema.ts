@@ -49,12 +49,15 @@ CREATE TABLE IF NOT EXISTS messages (
   text TEXT NOT NULL DEFAULT '',
   media JSONB NOT NULL DEFAULT '{}'::jsonb,
   audio_base64 TEXT,
+  video_base64 TEXT,
   transcript TEXT,
   transcript_status TEXT NOT NULL DEFAULT 'not_required',
   transcript_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (conversation_id, external_message_id)
 );
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS video_base64 TEXT;
 
 CREATE TABLE IF NOT EXISTS batches (
   id BIGSERIAL PRIMARY KEY,

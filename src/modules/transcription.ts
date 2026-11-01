@@ -21,7 +21,7 @@ export function transcriptionStatus(): TranscriptionStatus {
     language: config.whisperLanguage,
     detail: configured
       ? `Transcrição local configurada: ${path.basename(config.whisperModelPath)} (${config.whisperLanguage}).`
-      : 'Configure WHISPER_MODEL_PATH e instale whisper-cli e ffmpeg.'
+      : 'Configure WHISPER_MODEL_PATH e instale whisper-cli, ffmpeg e ffprobe para analisar vídeos.'
   };
 }
 
@@ -64,7 +64,6 @@ export async function transcribeAudio(bytes: Buffer, mimeType: string): Promise<
   const directory = await mkdtemp(path.join(tmpdir(), 'whatsapp-observer-audio-'));
   const inputPath = path.join(directory, `input${audioExtension(mimeType)}`);
   const wavPath = path.join(directory, 'input.wav');
-  const outputPrefix = path.join(directory, 'transcript');
   const env = safeSubprocessEnvironment();
 
   try {
@@ -78,24 +77,39 @@ export async function transcribeAudio(bytes: Buffer, mimeType: string): Promise<
       outputLimit: 20_000,
       env
     });
-    await runCaptured(config.whisperCppCli, [
-      '--model', config.whisperModelPath,
-      '--file', wavPath,
-      '--language', config.whisperLanguage,
-      '--threads', String(config.whisperThreads),
-      '--no-timestamps',
-      '--output-txt',
-      '--output-file', outputPrefix
-    ], {
-      cwd: directory,
-      timeoutMs: config.whisperTimeoutMs,
-      outputLimit: 50_000,
-      env
-    });
-    const transcript = (await readFile(`${outputPrefix}.txt`, 'utf8')).trim();
-    if (!transcript) throw new Error('whisper.cpp retornou uma transcrição vazia');
-    return transcript;
+    return await transcribeWavFile(wavPath);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+export async function transcribeWavFile(wavPath: string, allowEmpty = false): Promise<string> {
+  if (!config.whisperModelPath) {
+    throw new Error('Transcrição local não configurada: WHISPER_MODEL_PATH ausente');
+  }
+  try {
+    await access(config.whisperModelPath);
+    await access(wavPath);
+  } catch {
+    throw new Error('O modelo Whisper ou o áudio WAV temporário não foi encontrado');
+  }
+
+  const outputPrefix = path.join(path.dirname(wavPath), `transcript-${path.basename(wavPath)}`);
+  await runCaptured(config.whisperCppCli, [
+    '--model', config.whisperModelPath,
+    '--file', wavPath,
+    '--language', config.whisperLanguage,
+    '--threads', String(config.whisperThreads),
+    '--no-timestamps',
+    '--output-txt',
+    '--output-file', outputPrefix
+  ], {
+    cwd: path.dirname(wavPath),
+    timeoutMs: config.whisperTimeoutMs,
+    outputLimit: 50_000,
+    env: safeSubprocessEnvironment()
+  });
+  const transcript = (await readFile(`${outputPrefix}.txt`, 'utf8')).trim();
+  if (!transcript && !allowEmpty) throw new Error('whisper.cpp retornou uma transcrição vazia');
+  return transcript;
 }

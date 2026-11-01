@@ -4,6 +4,7 @@ import { inTransaction, pool } from '../db/index.js';
 import type { Interpretation, ObserverContext } from './interpreter.js';
 import { interpret } from './interpreter.js';
 import { transcribeAudio } from './transcription.js';
+import { allocateVideoFrameCounts, prepareVideo, type PreparedVideo } from './video.js';
 import type { NormalizedMessage } from './whatsapp.js';
 import { normalizeDemandTitle } from './whatsapp.js';
 
@@ -21,6 +22,11 @@ interface StoredMessage extends NormalizedMessage {
   id: number;
   transcript: string | null;
   transcriptStatus: string;
+}
+
+interface PreparedBatchVideo {
+  messageId: number;
+  prepared: PreparedVideo;
 }
 
 interface ExistingDemand {
@@ -79,6 +85,38 @@ function mediaMimeType(media: Record<string, unknown>): string {
   return mimeType.startsWith('audio/') ? mimeType : 'audio/ogg';
 }
 
+async function readResponseBytes(
+  response: Response,
+  maxBytes: number,
+  label: 'áudio' | 'vídeo',
+  limitName: 'MAX_AUDIO_BYTES' | 'MAX_VIDEO_BYTES'
+): Promise<Buffer> {
+  const contentLength = Number(response.headers.get('content-length') ?? 0);
+  if (contentLength > maxBytes) throw new Error(`O ${label} excede ${limitName}`);
+  if (!response.body) throw new Error(`A resposta de mídia não contém ${label}`);
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error(`O ${label} excede ${limitName}`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  if (!totalBytes) throw new Error(`O arquivo de ${label} recebido está vazio`);
+  return Buffer.concat(chunks, totalBytes);
+}
+
 async function loadAudioBytes(message: StoredMessage): Promise<Buffer> {
   if (message.audioBase64) {
     const bytes = Buffer.from(message.audioBase64.replace(/\s/g, ''), 'base64');
@@ -105,12 +143,37 @@ async function loadAudioBytes(message: StoredMessage): Promise<Buffer> {
     signal: AbortSignal.timeout(30_000)
   });
   if (!response.ok) throw new Error(`Download do áudio respondeu HTTP ${response.status}`);
-  const contentLength = Number(response.headers.get('content-length') ?? 0);
-  if (contentLength > config.maxAudioBytes) throw new Error('O áudio excede MAX_AUDIO_BYTES');
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (!bytes.length) throw new Error('O arquivo de áudio recebido está vazio');
-  if (bytes.length > config.maxAudioBytes) throw new Error('O áudio excede MAX_AUDIO_BYTES');
-  return bytes;
+  return readResponseBytes(response, config.maxAudioBytes, 'áudio', 'MAX_AUDIO_BYTES');
+}
+
+async function loadVideoBytes(message: StoredMessage, storedBase64 = message.videoBase64): Promise<Buffer> {
+  if (storedBase64) {
+    const bytes = Buffer.from(storedBase64.replace(/\s/g, ''), 'base64');
+    if (!bytes.length) throw new Error('O vídeo recebido está vazio');
+    if (bytes.length > config.maxVideoBytes) throw new Error('O vídeo excede MAX_VIDEO_BYTES');
+    return bytes;
+  }
+  const mediaUrl = typeof message.media.url === 'string' ? message.media.url : '';
+  const apiUrl = message.provider === 'waha' ? config.wahaApiUrl : config.evolutionApiUrl;
+  const apiKey = message.provider === 'waha' ? config.wahaApiKey : config.evolutionApiKey;
+  if (!apiUrl || !mediaUrl) throw new Error('Vídeo preservado sem base64; configure webhookBase64 ou a URL de mídia da API');
+
+  let mediaPath: string;
+  try {
+    const parsed = new URL(mediaUrl, 'http://local.invalid');
+    mediaPath = parsed.pathname + parsed.search;
+  } catch {
+    throw new Error('URL de mídia de vídeo inválida');
+  }
+  if (!mediaPath.startsWith('/api/files/')) throw new Error('A URL de mídia deve apontar para /api/files/');
+  const headers: Record<string, string> = {};
+  if (apiKey) headers[message.provider === 'waha' ? 'X-Api-Key' : 'apikey'] = apiKey;
+  const response = await fetch(`${apiUrl}${mediaPath}`, {
+    headers,
+    signal: AbortSignal.timeout(30_000)
+  });
+  if (!response.ok) throw new Error(`Download do vídeo respondeu HTTP ${response.status}`);
+  return readResponseBytes(response, config.maxVideoBytes, 'vídeo', 'MAX_VIDEO_BYTES');
 }
 
 async function transcribeBatchAudios(batchId: number): Promise<void> {
@@ -146,6 +209,7 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
       text: '',
       media: row.media,
       audioBase64: row.audio_base64,
+      videoBase64: null,
       transcript: null,
       transcriptStatus: row.transcript_status
     };
@@ -166,6 +230,61 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
       );
       throw error;
     }
+  }
+}
+
+function videoMimeType(media: Record<string, unknown>): string {
+  const mimeType = typeof media.mimetype === 'string' ? media.mimetype : '';
+  return mimeType.startsWith('video/') ? mimeType : 'video/mp4';
+}
+
+async function prepareBatchVideos(messages: StoredMessage[]): Promise<PreparedBatchVideo[]> {
+  const videos = messages.filter((message) => message.kind === 'video');
+  const frameCounts = allocateVideoFrameCounts(videos.length);
+  const preparedVideos: PreparedBatchVideo[] = [];
+  let currentMessage: StoredMessage | undefined;
+  try {
+    for (const [index, message] of videos.entries()) {
+      currentMessage = message;
+      const stored = await pool.query<{ video_base64: string | null }>(
+        'SELECT video_base64 FROM messages WHERE id = $1', [message.id]
+      );
+      const bytes = await loadVideoBytes(message, stored.rows[0]?.video_base64 ?? null);
+      const prepared = await prepareVideo(bytes, videoMimeType(message.media), {
+        frameCount: frameCounts[index] ?? 0,
+        transcribe: message.transcriptStatus !== 'done'
+      });
+      if (message.transcriptStatus === 'done') prepared.transcript = message.transcript;
+      preparedVideos.push({ messageId: message.id, prepared });
+      if (message.transcriptStatus !== 'done') {
+        message.transcript = prepared.transcript;
+        message.transcriptStatus = 'done';
+        await pool.query(
+          `UPDATE messages SET transcript = $2, transcript_status = 'done', transcript_error = NULL,
+             media = media || $3::jsonb
+           WHERE id = $1`,
+          [message.id, prepared.transcript, JSON.stringify({
+            videoAnalysis: {
+              durationSeconds: prepared.durationSeconds,
+              extractedFrames: prepared.frames.length
+            }
+          })]
+        );
+      }
+    }
+    return preparedVideos;
+  } catch (error) {
+    if (currentMessage) {
+      const errorText = error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800);
+      if (currentMessage.transcriptStatus !== 'done') {
+        await pool.query(
+          `UPDATE messages SET transcript_status = 'failed', transcript_error = $2 WHERE id = $1`,
+          [currentMessage.id, errorText]
+        );
+      }
+    }
+    await Promise.allSettled(preparedVideos.map(({ prepared }) => prepared.cleanup()));
+    throw error;
   }
 }
 
@@ -213,6 +332,7 @@ async function readBatch(batchId: number): Promise<{ batch: BatchRow; messages: 
     text: row.text,
     media: row.media,
     audioBase64: row.audio_base64,
+    videoBase64: null,
     transcript: row.transcript,
     transcriptStatus: row.transcript_status
   }));
@@ -320,13 +440,24 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
     fromMe: row.from_me,
     text: row.transcript || row.text || `[${row.kind}]`
   }));
-  const batchMessages = messages.map((message) => ({
-    id: String(message.id),
-    sentAt: message.sentAt.toISOString(),
-    sender: message.fromMe ? 'Operador' : message.senderName || message.senderJid || 'Contato',
-    fromMe: message.fromMe,
-    text: message.transcript || message.text || `[${message.kind}]`
-  }));
+  const batchMessages = messages.map((message) => {
+    const textParts = [message.text.trim()];
+    if (message.transcript?.trim()) {
+      textParts.push(message.kind === 'video'
+        ? `Fala identificada no vídeo: ${message.transcript.trim()}`
+        : `Transcrição do áudio: ${message.transcript.trim()}`);
+    } else if (message.kind === 'video' && !message.text.trim()) {
+      textParts.push('[vídeo sem legenda ou fala transcrita]');
+    }
+    return {
+      id: String(message.id),
+      sentAt: message.sentAt.toISOString(),
+      sender: message.fromMe ? 'Operador' : message.senderName || message.senderJid || 'Contato',
+      fromMe: message.fromMe,
+      kind: message.kind,
+      text: textParts.filter(Boolean).join('\n') || `[${message.kind}]`
+    };
+  });
 
   return {
     projects,
@@ -341,7 +472,8 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
       },
       recentMessages,
       projects: aiProjects,
-      batchMessages
+      batchMessages,
+      videoFrames: []
     }
   };
 }
@@ -537,13 +669,30 @@ export async function processBatchInterpretation(batchId: number): Promise<void>
   );
   const projectIds = linkResult.rows.map((row) => row.id);
   if (!projectIds.length) return;
-
-  await lockProjects(projectIds, async () => {
-    const { context, projects, demands } = await buildContext(batch, messages);
-    const interpretation = await interpret(context);
-    if (interpretation.conversationSummary.length > conversationSummaryLimit || interpretation.actions.length > 40) {
-      throw new Error('A interpretação excedeu os limites da aplicação');
-    }
-    await applyInterpretation(batch, messages, interpretation, projects, demands);
-  });
+  const preparedVideos = await prepareBatchVideos(messages);
+  try {
+    await lockProjects(projectIds, async () => {
+      const { context, projects, demands } = await buildContext(batch, messages);
+      const videosById = new Map(preparedVideos.map((video) => [video.messageId, video.prepared]));
+      context.videoFrames = preparedVideos.flatMap(({ messageId, prepared }) => prepared.frames.map((frame, index) => ({
+        messageId: String(messageId),
+        frameNumber: index + 1,
+        timestampSeconds: frame.timestampSeconds,
+        durationSeconds: prepared.durationSeconds
+      })));
+      const imagePaths = preparedVideos.flatMap(({ prepared }) => prepared.frames.map((frame) => frame.path));
+      for (const message of context.batchMessages) {
+        if (message.kind === 'video' && !videosById.get(Number(message.id))?.frames.length) {
+          message.text += '\n[quadros de vídeo não anexados]';
+        }
+      }
+      const interpretation = await interpret(context, imagePaths);
+      if (interpretation.conversationSummary.length > conversationSummaryLimit || interpretation.actions.length > 40) {
+        throw new Error('A interpretação excedeu os limites da aplicação');
+      }
+      await applyInterpretation(batch, messages, interpretation, projects, demands);
+    });
+  } finally {
+    await Promise.allSettled(preparedVideos.map(({ prepared }) => prepared.cleanup()));
+  }
 }

@@ -79,6 +79,12 @@ async function finishBatch(batch: ClaimedBatch): Promise<void> {
       'UPDATE conversations SET processing_batch_id = NULL WHERE id = $1 AND processing_batch_id = $2',
       [batch.conversation_id, batch.id]
     );
+    await client.query(
+      `UPDATE messages SET video_base64 = NULL WHERE id IN (
+         SELECT message_id FROM batch_messages WHERE batch_id = $1
+       )`,
+      [batch.id]
+    );
   });
 }
 
@@ -326,9 +332,9 @@ async function processCodexJob(job: ClaimedCodexJob): Promise<void> {
 async function cleanOldData(): Promise<void> {
   if (!config.messageRetentionDays) return;
   await pool.query(
-    `UPDATE messages m SET text = '', transcript = NULL, audio_base64 = NULL, media = '{}'::jsonb,
+    `UPDATE messages m SET text = '', transcript = NULL, audio_base64 = NULL, video_base64 = NULL, media = '{}'::jsonb,
        sender_jid = '', sender_name = '', transcript_error = NULL,
-       transcript_status = CASE WHEN kind = 'audio' THEN 'expired' ELSE transcript_status END
+       transcript_status = CASE WHEN kind IN ('audio', 'video') THEN 'expired' ELSE transcript_status END
      WHERE m.received_at < now() - ($1::text || ' days')::interval
        AND EXISTS (SELECT 1 FROM demand_messages dm WHERE dm.message_id = m.id)
        AND NOT EXISTS (

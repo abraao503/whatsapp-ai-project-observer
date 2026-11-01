@@ -41,6 +41,7 @@ export const config = {
   whisperCppCli: process.env.WHISPER_CPP_CLI ?? 'whisper-cli',
   whisperModelPath: process.env.WHISPER_MODEL_PATH ?? '',
   ffmpegCli: process.env.FFMPEG_CLI ?? 'ffmpeg',
+  ffprobeCli: process.env.FFPROBE_CLI ?? 'ffprobe',
   whisperLanguage: process.env.WHISPER_LANGUAGE ?? 'pt',
   whisperThreads: numberFromEnv('WHISPER_THREADS', 1),
   whisperTimeoutMs: numberFromEnv('WHISPER_TIMEOUT_MS', 300_000),
@@ -53,7 +54,12 @@ export const config = {
   codexConcurrency: numberFromEnv('CODEX_CONCURRENCY', 1),
   workerPollMs: numberFromEnv('WORKER_POLL_MS', 1_000),
   messageRetentionDays: numberFromEnv('MESSAGE_RETENTION_DAYS', 365, 0),
-  maxAudioBytes: numberFromEnv('MAX_AUDIO_BYTES', 25_000_000)
+  maxAudioBytes: numberFromEnv('MAX_AUDIO_BYTES', 25_000_000),
+  maxVideoBytes: numberFromEnv('MAX_VIDEO_BYTES', 50_000_000),
+  videoMaxDurationSeconds: numberFromEnv('VIDEO_MAX_DURATION_SECONDS', 180),
+  videoMaxFramesPerMessage: numberFromEnv('VIDEO_MAX_FRAMES_PER_MESSAGE', 6),
+  videoMaxFramesPerBatch: numberFromEnv('VIDEO_MAX_FRAMES_PER_BATCH', 12),
+  videoProcessingTimeoutMs: numberFromEnv('VIDEO_PROCESSING_TIMEOUT_MS', 120_000)
 };
 
 export function validateConfig(): void {
