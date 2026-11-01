@@ -1,0 +1,30 @@
+{
+  "name": "whatsapp-ai-project-observer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Observa conversas autorizadas do WhatsApp, agrupa mensagens e mantém demandas sincronizadas com Linear.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "test": "node --import tsx --test test/core.test.ts test/codex.test.ts",
+    "test:flow": "node --import tsx --test --test-concurrency=1 test/flow.test.ts test/batching-flow.test.ts test/audio-flow.test.ts",
+    "eval:luna": "node --import tsx scripts/eval-luna.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "fastify": "^5.6.1",
+    "pg": "^8.16.3",
+    "tsx": "^4.20.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.9.3"
+  }
+}
