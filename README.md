@@ -96,7 +96,7 @@ Não rode o SQL se a role ou banco já existirem; confira o estado primeiro. Con
 Cadastre explicitamente cada conversa autorizada no painel `/admin`. Depois de conectar a conta WAHA, carregue os contatos/grupos, escolha a conversa e selecione um ou mais projetos relacionados; o JID continua editável para entrada manual e para Evolution. Vínculos existentes podem ser editados pela lista de conversas. A seleção no painel apenas concede monitoramento após salvar; eventos de outras conversas são descartados. O webhook só persiste a mensagem e agenda o lote; não chama IA nem Codex durante a requisição.
 
 - Evolution: configure `EVOLUTION_WEBHOOK_TOKEN` e envie os eventos `MESSAGES_UPSERT` e `SEND_MESSAGE` para `/webhooks/evolution/<token>`. Para mídia, configure a integração para incluir base64 (`webhookBase64`) ou forneça `EVOLUTION_API_URL` e chave de API compatíveis com um endpoint `/api/files/...`.
-- WAHA: o projeto usa uma instância própria local em `127.0.0.1:3201`. O painel inicia a sessão `observer`, configura `message.any` com assinatura HMAC e mostra o QR/status. A API do WAHA fica restrita ao loopback; mensagens não monitoradas são descartadas pelo Observer. Para baixar áudio sem base64, o processo usa a API local autenticada.
+- WAHA: o projeto usa uma instância própria em `127.0.0.1:3201`. O painel inicia a sessão `observer`, configura `message.any` com assinatura HMAC e mostra o QR/status. O Observer acessa a API pelo loopback e usa chave; mantenha a porta 3201 bloqueada para conexões externas no firewall. Mensagens não monitoradas são descartadas pelo Observer. Para baixar áudio sem base64, o processo usa a API local autenticada.
 
 Para conectar um número, abra `/admin`, selecione **Conectar número do WhatsApp** e escaneie o QR em WhatsApp → Dispositivos conectados. O estado da conexão e o nome/número da conta são atualizados pelo painel. A sessão fica persistida no volume `/home/ubuntu/.local/share/whatsapp-observer/waha-sessions`, inclusive após reiniciar o container. A sessão habilita o armazenamento NOWEB com sincronização histórica limitada; isso é necessário para listar contatos e grupos e não deve ser alterado depois do pareamento.
 
@@ -136,7 +136,7 @@ Instale e autentique o Codex CLI para o mesmo usuário que executa a aplicação
 
 ### WAHA próprio na VPS
 
-Use uma instância separada daquelas pertencentes a outros projetos. O servidor API deve ficar somente no loopback; não publique a porta 3201. Exemplo para a imagem ARM64 usada nesta VPS, sem Docker Compose:
+Use uma instância separada daquelas pertencentes a outros projetos. Esta VPS usa host networking para que o webhook WAHA alcance o backend em `127.0.0.1:3105`; a API WAHA escuta em wildcard nesta imagem, portanto a firewall do host precisa rejeitar conexões de entrada na porta 3201. Não adicione uma regra de liberação nem exponha a porta por Nginx. Exemplo para a imagem ARM64 usada nesta VPS, sem Docker Compose:
 
 ```sh
 docker run --detach --name whatsapp-observer-waha \
@@ -146,7 +146,7 @@ docker run --detach --name whatsapp-observer-waha \
   devlikeapro/waha:noweb-arm-2026.10.1
 ```
 
-O arquivo privado `waha.env` define `WHATSAPP_API_HOSTNAME=127.0.0.1`, `WHATSAPP_API_PORT=3201`, `WHATSAPP_DEFAULT_ENGINE=NOWEB`, uma `WAHA_API_KEY` em formato SHA-512, desativa Dashboard/Swagger e mantém o QR fora dos logs. No `.env` do Observer, configure `WAHA_API_URL=http://127.0.0.1:3201`, a chave original em `WAHA_API_KEY`, `WAHA_HMAC_KEY` e `WAHA_SESSION=observer`. O painel cria/atualiza a sessão e a assinatura do webhook ao iniciar o pareamento.
+O arquivo privado `waha.env` define a URL-base local, `WHATSAPP_API_PORT=3201`, `WHATSAPP_DEFAULT_ENGINE=NOWEB`, uma `WAHA_API_KEY` em formato SHA-512, desativa Dashboard/Swagger e mantém o QR fora dos logs. `WHATSAPP_API_HOSTNAME` compõe URLs do WAHA, mas nesta imagem não restringe o endereço de bind do servidor. No `.env` do Observer, configure `WAHA_API_URL=http://127.0.0.1:3201`, a chave original em `WAHA_API_KEY`, `WAHA_HMAC_KEY` e `WAHA_SESSION=observer`. O painel cria/atualiza a sessão e a assinatura do webhook ao iniciar o pareamento.
 
 ## Debounce, sequência e recuperação
 
