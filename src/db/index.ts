@@ -31,6 +31,15 @@ export async function initializeDatabase(): Promise<void> {
     WHERE linear_sync_status = 'syncing'
   `);
   await pool.query(`
+    UPDATE demands d SET linear_sync_status = 'pending',
+      linear_sync_revision = GREATEST(d.linear_sync_revision, 1),
+      linear_next_attempt_at = now(), updated_at = now()
+    FROM projects p
+    WHERE p.id = d.project_id AND p.linear_team_id <> ''
+      AND d.status = 'pending_context' AND d.linear_issue_id IS NULL
+      AND d.linear_sync_status = 'not_ready'
+  `);
+  await pool.query(`
     UPDATE codex_jobs SET status = 'pending', started_at = NULL,
       last_error = COALESCE(last_error, 'Análise retomada após reinício do serviço')
     WHERE status = 'processing'
