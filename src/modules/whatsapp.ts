@@ -126,7 +126,26 @@ function wahaMessage(session: string, item: unknown): NormalizedMessage | null {
   const fromMe = payload.fromMe === true;
   const from = stringValue(payload.from);
   const to = stringValue(payload.to);
-  const remoteJid = pickString(payload.chatId, fromMe ? to : from, from, to);
+  const dataKey = asRecord(asRecord(payload._data).key);
+  const chatId = stringValue(payload.chatId);
+  const keyRemoteJid = stringValue(dataKey.remoteJid);
+  const keyRemoteJidAlt = stringValue(dataKey.remoteJidAlt);
+  const directedJid = fromMe ? to : from;
+  const primaryJid = pickString(chatId, keyRemoteJid, directedJid, from, to);
+  const normalizeJid = (jid: string) => jid.endsWith('@s.whatsapp.net')
+    ? `${jid.slice(0, -'@s.whatsapp.net'.length)}@c.us`
+    : jid;
+  // NOWEB may expose a direct chat as @lid in the message fields while its
+  // alternate JID is the phone based ID used by /chats/overview. Use that
+  // alias only when WAHA supplied it alongside the same primary remote JID.
+  // Group IDs take precedence because their alternate JID can belong to a member.
+  const groupJid = [chatId, keyRemoteJid, directedJid, from, to].find((jid) => jid.endsWith('@g.us'));
+  const pairedAlternate = primaryJid.endsWith('@lid') && keyRemoteJid === primaryJid
+    ? keyRemoteJidAlt
+    : '';
+  const remoteJid = groupJid
+    ? normalizeJid(groupJid)
+    : normalizeJid(pairedAlternate || primaryJid);
   if (!remoteJid || !externalMessageId) return null;
 
   const media = asRecord(payload.media);

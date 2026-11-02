@@ -61,6 +61,46 @@ test('WAHA message.any preserves own replies and group authorship', () => {
   assert.equal(parsed.messages[0]?.text, 'Inclua filtro por funcionário');
 });
 
+test('WAHA NOWEB maps LID messages to the configured phone chat for inbound and own messages', () => {
+  for (const fromMe of [false, true]) {
+    const parsed = parseWebhook('waha', {
+      event: 'message.any',
+      session: 'main',
+      payload: {
+        id: `${fromMe ? 'true' : 'false'}_15550000000@lid_message-${fromMe}`,
+        timestamp: 1_767_268_800,
+        from: '15550000000@lid',
+        fromMe,
+        body: 'Refinamento da demanda',
+        _data: {
+          key: {
+            remoteJid: '15550000000@lid',
+            remoteJidAlt: '15550000000@s.whatsapp.net'
+          }
+        }
+      }
+    });
+
+    assert.equal(parsed.messages[0]?.remoteJid, '15550000000@c.us');
+    assert.equal(parsed.messages[0]?.fromMe, fromMe);
+  }
+});
+
+test('WAHA keeps an unpaired LID instead of routing it to another JID in the payload', () => {
+  const parsed = parseWebhook('waha', {
+    event: 'message.any',
+    session: 'main',
+    payload: {
+      id: 'false_contact@lid_message',
+      from: 'contact@lid',
+      fromMe: false,
+      to: 'my-number@s.whatsapp.net'
+    }
+  });
+
+  assert.equal(parsed.messages[0]?.remoteJid, 'contact@lid');
+});
+
 test('WAHA voice notes are retained as audio messages', () => {
   const parsed = parseWebhook('waha', {
     event: 'message',
@@ -191,8 +231,8 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
   const previousLinearApiKey = process.env.LINEAR_API_KEY;
   process.env.LINEAR_API_KEY = 'local-test-key';
   const operations: Array<{ name: string; variables: Record<string, unknown> }> = [];
-  const labels: Array<{ id: string; name: string }> = [];
-  let currentIssueLabels: Array<{ id: string; name: string }> = [];
+  const labels: Array<{ id: string; name: string; color: string }> = [];
+  let currentIssueLabels: Array<{ id: string; name: string; color: string }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body)) as { query: string; variables: Record<string, unknown> };
@@ -202,10 +242,17 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     }
     if (request.query.includes('mutation CreateObserverLabel')) {
       operations.push({ name: 'create-label', variables: request.variables });
-      const input = request.variables.input as { name: string };
-      const label = { id: `label-${labels.length + 1}`, name: input.name };
+      const input = request.variables.input as { name: string; color: string };
+      const label = { id: `label-${labels.length + 1}`, name: input.name, color: input.color };
       labels.push(label);
       return new Response(JSON.stringify({ data: { issueLabelCreate: { success: true, issueLabel: label } } }), { status: 200 });
+    }
+    if (request.query.includes('mutation UpdateObserverLabelColor')) {
+      operations.push({ name: 'update-label-color', variables: request.variables });
+      const input = request.variables.input as { color: string };
+      const label = labels.find((candidate) => candidate.id === request.variables.id)!;
+      label.color = input.color;
+      return new Response(JSON.stringify({ data: { issueLabelUpdate: { success: true } } }), { status: 200 });
     }
     if (request.query.includes('query ObserverIssueLabels')) {
       operations.push({ name: 'issue-labels', variables: request.variables });
@@ -220,6 +267,11 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     if (request.query.includes('query FindObserverIssue')) {
       operations.push({ name: 'find', variables: request.variables });
       return new Response(JSON.stringify({ data: { issues: { nodes: [] } } }), { status: 200 });
+    }
+    if (request.query.includes('query ObserverBacklogWorkflowState')) {
+      return new Response(JSON.stringify({ data: { workflowStates: { nodes: [
+        { id: 'state-backlog', name: 'Backlog', type: 'backlog' }
+      ] } } }), { status: 200 });
     }
     if (request.query.includes('mutation CreateObserverIssue')) {
       operations.push({ name: 'create', variables: request.variables });
@@ -267,6 +319,7 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     const createInput = createOperation.variables.input as { description: string; labelIds: string[] };
     assert.equal(createInput.labelIds.length, 2);
     assert.deepEqual(currentIssueLabels.map((label) => label.name), ['Tipo: Funcionalidade', 'Projeto: Projeto de teste']);
+    assert.notEqual(currentIssueLabels[0]?.color, currentIssueLabels[1]?.color);
     const createdDescription = createInput.description;
     assert.match(createdDescription, /### Objetivo e escopo/);
     assert.match(createdDescription, /### Requisitos/);
@@ -289,7 +342,7 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
       conversationContext: 'Cliente confirmou Excel e acrescentou filtros de data e funcionário.',
       linearIssueId: created.id
     };
-    const manualLabel = { id: 'manual-priority', name: 'Prioridade manual' };
+    const manualLabel = { id: 'manual-priority', name: 'Prioridade manual', color: '#64748B' };
     labels.push(manualLabel);
     currentIssueLabels.push(manualLabel);
     const updated = await createOrUpdateIssue(refined, project);
@@ -301,6 +354,7 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     assert.match((updateVariables.input as { description: string }).description, /Filtrar por data e funcionário/);
     assert.deepEqual(currentIssueLabels.map((label) => label.name).sort(),
       ['Prioridade manual', 'Projeto: Projeto de teste', 'Tipo: Bug'].sort());
+    assert.equal(labels.find((label) => label.name === 'Tipo: Bug')?.color, '#D92D20');
   } finally {
     globalThis.fetch = originalFetch;
     if (previousLinearApiKey === undefined) delete process.env.LINEAR_API_KEY;
@@ -319,8 +373,8 @@ test('Linear retry finds a card created before a simulated timeout instead of cr
     title: 'Exportar histórico',
     description: ''
   };
-  const labels: Array<{ id: string; name: string }> = [];
-  let currentIssueLabels: Array<{ id: string; name: string }> = [];
+  const labels: Array<{ id: string; name: string; color: string }> = [];
+  let currentIssueLabels: Array<{ id: string; name: string; color: string }> = [];
   let createCalls = 0;
   let updateCalls = 0;
 
@@ -330,10 +384,16 @@ test('Linear retry finds a card created before a simulated timeout instead of cr
       return new Response(JSON.stringify({ data: { issueLabels: { nodes: labels } } }), { status: 200 });
     }
     if (request.query.includes('mutation CreateObserverLabel')) {
-      const input = request.variables.input as { name: string };
-      const label = { id: `label-${labels.length + 1}`, name: input.name };
+      const input = request.variables.input as { name: string; color: string };
+      const label = { id: `label-${labels.length + 1}`, name: input.name, color: input.color };
       labels.push(label);
       return new Response(JSON.stringify({ data: { issueLabelCreate: { success: true, issueLabel: label } } }), { status: 200 });
+    }
+    if (request.query.includes('mutation UpdateObserverLabelColor')) {
+      const input = request.variables.input as { color: string };
+      const label = labels.find((candidate) => candidate.id === request.variables.id)!;
+      label.color = input.color;
+      return new Response(JSON.stringify({ data: { issueLabelUpdate: { success: true } } }), { status: 200 });
     }
     if (request.query.includes('query ObserverIssueLabels')) {
       return new Response(JSON.stringify({ data: { issue: { labels: { nodes: currentIssueLabels } } } }), { status: 200 });
@@ -346,6 +406,11 @@ test('Linear retry finds a card created before a simulated timeout instead of cr
     if (request.query.includes('query FindObserverIssue')) {
       const found = issue.description.includes('whatsapp-ai-project-observer:demand:88');
       return new Response(JSON.stringify({ data: { issues: { nodes: found ? [issue] : [] } } }), { status: 200 });
+    }
+    if (request.query.includes('query ObserverBacklogWorkflowState')) {
+      return new Response(JSON.stringify({ data: { workflowStates: { nodes: [
+        { id: 'state-backlog', name: 'Backlog', type: 'backlog' }
+      ] } } }), { status: 200 });
     }
     if (request.query.includes('mutation CreateObserverIssue')) {
       createCalls += 1;

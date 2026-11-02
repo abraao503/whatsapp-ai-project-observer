@@ -121,6 +121,11 @@ process.stdin.on('end', async () => {
         calls.push({ service: 'linear', operation: 'find', body });
         return new Response(JSON.stringify({ data: { issues: { nodes: [] } } }), { status: 200 });
       }
+      if (query.includes('query ObserverBacklogWorkflowState')) {
+        return new Response(JSON.stringify({ data: { workflowStates: { nodes: [
+          { id: 'state-backlog', name: 'Backlog', type: 'backlog' }
+        ] } } }), { status: 200 });
+      }
       if (query.includes('mutation CreateObserverIssue')) {
         calls.push({ service: 'linear', operation: 'create', body });
         const input = body.variables as { input: { title: string; labelIds: string[] } };

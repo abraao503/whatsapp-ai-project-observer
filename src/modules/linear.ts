@@ -35,6 +35,18 @@ export interface LinearIssue {
 interface LinearLabel {
   id: string;
   name: string;
+  color: string;
+}
+
+interface LinearLabelSpec {
+  name: string;
+  color: string;
+}
+
+interface LinearWorkflowState {
+  id: string;
+  name: string;
+  type: string;
 }
 
 async function graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
@@ -62,6 +74,22 @@ async function graphql<T>(query: string, variables: Record<string, unknown>): Pr
   return payload.data;
 }
 
+async function backlogStateIdFor(teamId: string): Promise<string> {
+  const data = await graphql<{
+    workflowStates: { nodes: LinearWorkflowState[] };
+  }>(
+    `query ObserverBacklogWorkflowState($filter: WorkflowStateFilter!) {
+      workflowStates(filter: $filter, first: 250) { nodes { id name type } }
+    }`,
+    { filter: { team: { id: { eq: teamId } } } }
+  );
+  const backlog = data.workflowStates.nodes.find((state) =>
+    state.type === 'backlog' && state.name.trim().toLocaleLowerCase() === 'backlog'
+  );
+  if (!backlog) throw new Error(`A equipe Linear ${teamId} não tem uma coluna Backlog configurada`);
+  return backlog.id;
+}
+
 function markerFor(demandId: number): string {
   return `<!-- whatsapp-ai-project-observer:demand:${demandId} -->`;
 }
@@ -83,12 +111,8 @@ export function buildLinearDescription(demand: LinearDemand, project: LinearProj
     improvement: 'Melhoria',
     change: 'Alteração'
   };
-  const status = demand.status === 'cancelled'
-    ? 'Cancelada'
-    : demand.status === 'pending_context' ? 'Aguardando contexto' : 'Em acompanhamento';
   return [
     `### Projeto\n${project.name}`,
-    `### Status\n${status}`,
     `### Tipo\n${typeLabels[demand.demandType] ?? demand.demandType}`,
     textSection('Objetivo e escopo', demand.summary),
     listSection('Requisitos', demand.requirements),
@@ -100,45 +124,76 @@ export function buildLinearDescription(demand: LinearDemand, project: LinearProj
   ].filter(Boolean).join('\n\n');
 }
 
-function labelsFor(demand: LinearDemand, project: LinearProject): string[] {
-  const typeLabels: Record<string, string> = {
-    feature: 'Tipo: Funcionalidade',
-    bug: 'Tipo: Bug',
-    improvement: 'Tipo: Melhoria',
-    change: 'Tipo: Alteração'
-  };
-  const type = typeLabels[demand.demandType];
-  if (!type) throw new Error(`Tipo de demanda sem label Linear: ${demand.demandType}`);
-  return [type, `Projeto: ${project.name.trim()}`];
+const typeLabelColors: Record<string, string> = {
+  feature: '#5E6AD2',
+  bug: '#D92D20',
+  improvement: '#EAAA08',
+  change: '#7F56D9'
+};
+
+const projectLabelColors = ['#27AE60', '#00A3BF', '#F2994A', '#D63384', '#64748B', '#14B8A6'];
+
+function projectLabelColor(projectName: string): string {
+  let hash = 2_166_136_261;
+  for (const character of projectName.trim().toLocaleLowerCase()) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16_777_619) >>> 0;
+  }
+  return projectLabelColors[hash % projectLabelColors.length]!;
 }
 
-async function ensureLabels(names: string[], teamId: string): Promise<LinearLabel[]> {
+function labelsFor(demand: LinearDemand, project: LinearProject): LinearLabelSpec[] {
+  const typeLabels: Record<string, string> = {
+    feature: 'Funcionalidade',
+    bug: 'Bug',
+    improvement: 'Melhoria',
+    change: 'Alteração'
+  };
+  const typeName = typeLabels[demand.demandType];
+  const typeColor = typeLabelColors[demand.demandType];
+  if (!typeName || !typeColor) throw new Error(`Tipo de demanda sem label Linear: ${demand.demandType}`);
+  return [
+    { name: `Tipo: ${typeName}`, color: typeColor },
+    { name: `Projeto: ${project.name.trim()}`, color: projectLabelColor(project.name) }
+  ];
+}
+
+async function ensureLabels(specs: LinearLabelSpec[], teamId: string): Promise<LinearLabel[]> {
   const query = `query ObserverTeamLabels($filter: IssueLabelFilter!) {
-    issueLabels(filter: $filter, first: 250) { nodes { id name } }
+    issueLabels(filter: $filter, first: 250) { nodes { id name color } }
   }`;
   const filter = { team: { id: { eq: teamId } } };
   let labels = (await graphql<{ issueLabels: { nodes: LinearLabel[] } }>(query, { filter })).issueLabels.nodes;
   const resolved: LinearLabel[] = [];
 
-  for (const name of names) {
-    let label = labels.find((candidate) => candidate.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  for (const spec of specs) {
+    let label = labels.find((candidate) => candidate.name.toLocaleLowerCase() === spec.name.toLocaleLowerCase());
     if (!label) {
       try {
         const created = await graphql<{ issueLabelCreate: { success: boolean; issueLabel: LinearLabel | null } }>(
           `mutation CreateObserverLabel($input: IssueLabelCreateInput!) {
-            issueLabelCreate(input: $input) { success issueLabel { id name } }
+            issueLabelCreate(input: $input) { success issueLabel { id name color } }
           }`,
-          { input: { name, teamId } }
+          { input: { name: spec.name, color: spec.color, teamId } }
         );
         label = created.issueLabelCreate.success ? created.issueLabelCreate.issueLabel ?? undefined : undefined;
       } catch (error) {
         // A concurrent sync may have created the same label. Re-read before failing.
         labels = (await graphql<{ issueLabels: { nodes: LinearLabel[] } }>(query, { filter })).issueLabels.nodes;
-        label = labels.find((candidate) => candidate.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+        label = labels.find((candidate) => candidate.name.toLocaleLowerCase() === spec.name.toLocaleLowerCase());
         if (!label) throw error;
       }
-      if (!label) throw new Error(`Linear não confirmou criação da label ${name}`);
+      if (!label) throw new Error(`Linear não confirmou criação da label ${spec.name}`);
       labels.push(label);
+    }
+    if (label.color.toLocaleUpperCase() !== spec.color.toLocaleUpperCase()) {
+      const updated = await graphql<{ issueLabelUpdate: { success: boolean } }>(
+        `mutation UpdateObserverLabelColor($id: String!, $input: IssueLabelUpdateInput!) {
+          issueLabelUpdate(id: $id, input: $input) { success }
+        }`,
+        { id: label.id, input: { color: spec.color } }
+      );
+      if (!updated.issueLabelUpdate.success) throw new Error(`Linear não confirmou a cor da label ${spec.name}`);
+      label.color = spec.color;
     }
     resolved.push(label);
   }
@@ -223,6 +278,7 @@ export async function createOrUpdateIssue(
 
   const input: Record<string, unknown> = {
     teamId: project.linearTeamId,
+    stateId: await backlogStateIdFor(project.linearTeamId),
     title: demand.title,
     description,
     labelIds: labels.map((label) => label.id)
