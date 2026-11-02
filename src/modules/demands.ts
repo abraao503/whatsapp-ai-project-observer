@@ -531,27 +531,23 @@ async function upsertDemand(
       JSON.stringify(openQuestions) !== JSON.stringify(existing.openQuestions) ||
       nextStatus !== existing.status || conversationContext !== existing.conversationContext;
     if (changed) {
-      const needsLinearSync = Boolean(existing.linearIssueId) || nextStatus === 'ready' || nextStatus === 'cancelled';
       await client.query(
         `UPDATE demands SET title = $2, summary = $3, demand_type = $4, status = $5,
            requirements = $6::jsonb, acceptance_criteria = $7::jsonb, open_questions = $8::jsonb,
            conversation_context = $9, version = version + 1,
            technical_analysis = '',
-           linear_sync_revision = linear_sync_revision + CASE WHEN $10 THEN 1 ELSE 0 END,
-           linear_next_attempt_at = CASE WHEN $10 THEN now() ELSE linear_next_attempt_at END,
+           linear_sync_revision = linear_sync_revision + 1,
+           linear_next_attempt_at = now(),
            linear_sync_status = CASE
-             WHEN $10 AND linear_sync_status = 'syncing' THEN 'syncing'
-             WHEN $10 THEN 'pending'
-             WHEN status = 'pending_context' AND NOT $11 THEN 'not_ready'
-             ELSE linear_sync_status
+             WHEN linear_sync_status = 'syncing' THEN 'syncing'
+             ELSE 'pending'
            END,
            updated_at = now()
          WHERE id = $1`,
         [
           existing.id, nextTitle, nextSummary, nextType, nextStatus,
           JSON.stringify(nextRequirements), JSON.stringify(nextAcceptanceCriteria),
-          JSON.stringify(openQuestions), conversationContext, needsLinearSync,
-          Boolean(existing.linearIssueId)
+          JSON.stringify(openQuestions), conversationContext
         ]
       );
       existing.version += 1;
@@ -585,8 +581,7 @@ async function upsertDemand(
     [
       projectId, title, summary, action.type, nextStatus,
       JSON.stringify(requirements), JSON.stringify(acceptanceCriteria), JSON.stringify(openQuestions),
-      conversationContext, nextStatus === 'ready' ? 'pending' : 'not_ready',
-      nextStatus === 'ready' ? 1 : 0
+      conversationContext, 'pending', 1
     ]
   );
   const demandId = created.rows[0]!.id;
@@ -609,8 +604,8 @@ async function upsertDemand(
     openQuestions,
     conversationContext,
     linearIssueId: null,
-    linearSyncStatus: nextStatus === 'ready' ? 'pending' : 'not_ready',
-    linearSyncRevision: nextStatus === 'ready' ? 1 : 0,
+    linearSyncStatus: 'pending',
+    linearSyncRevision: 1,
     technicalAnalysis: ''
   });
 }

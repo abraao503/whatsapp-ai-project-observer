@@ -151,10 +151,14 @@ function labelsFor(demand: LinearDemand, project: LinearProject): LinearLabelSpe
   const typeName = typeLabels[demand.demandType];
   const typeColor = typeLabelColors[demand.demandType];
   if (!typeName || !typeColor) throw new Error(`Tipo de demanda sem label Linear: ${demand.demandType}`);
-  return [
+  const labels = [
     { name: `Tipo: ${typeName}`, color: typeColor },
     { name: `Projeto: ${project.name.trim()}`, color: projectLabelColor(project.name) }
   ];
+  if (demand.status === 'pending_context') {
+    labels.push({ name: 'Aguardando contexto', color: '#F79009' });
+  }
+  return labels;
 }
 
 async function ensureLabels(specs: LinearLabelSpec[], teamId: string): Promise<LinearLabel[]> {
@@ -210,7 +214,7 @@ async function syncIssueLabels(issueId: string, labels: LinearLabel[]): Promise<
   if (!data.issue) throw new Error(`Linear não encontrou a issue ${issueId} para aplicar labels`);
   const expectedIds = new Set(labels.map((label) => label.id));
   const manualLabelIds = data.issue.labels.nodes
-    .filter((label) => !/^(Tipo|Projeto): /i.test(label.name))
+    .filter((label) => !/^(Tipo|Projeto): /i.test(label.name) && label.name !== 'Aguardando contexto')
     .map((label) => label.id);
   const labelIds = [...new Set([...manualLabelIds, ...expectedIds])];
   await graphql<{ issueUpdate: { success: boolean } }>(
