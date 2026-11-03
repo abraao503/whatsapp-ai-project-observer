@@ -1,14 +1,12 @@
 import { config as loadDotenv } from 'dotenv';
 import path from 'node:path';
 
-const envFile = loadDotenv({ path: path.resolve(process.cwd(), '.env') }).parsed;
-// These settings are persisted in .env. Prefer them over stale copies retained
-// by PM2 when it respawns the process.
-if (envFile?.LINEAR_API_KEY !== undefined) process.env.LINEAR_API_KEY = envFile.LINEAR_API_KEY;
-if (envFile?.REPOSITORY_ROOTS !== undefined) process.env.REPOSITORY_ROOTS = envFile.REPOSITORY_ROOTS;
-if (envFile?.REPOSITORY_SYNC_INTERVAL_MS !== undefined) {
-  process.env.REPOSITORY_SYNC_INTERVAL_MS = envFile.REPOSITORY_SYNC_INTERVAL_MS;
-}
+// In production, .env is the source of truth for saved settings. PM2 can retain
+// an old copy of its environment when the process is restarted by name.
+loadDotenv({
+  path: path.resolve(process.cwd(), '.env'),
+  override: process.env.NODE_ENV === 'production'
+});
 
 function numberFromEnv(name: string, fallback: number, minimum = 1): number {
   const raw = process.env[name];
