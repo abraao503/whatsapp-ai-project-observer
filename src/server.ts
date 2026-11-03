@@ -50,6 +50,23 @@ async function handleWebhook(
   }
 }
 
+async function initializeDatabaseWithRetry(): Promise<void> {
+  const attempts = 8;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await initializeDatabase();
+      return;
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String(error.code)
+        : 'erro';
+      console.error(`[startup] PostgreSQL indisponível (${attempt}/${attempts}; ${code}); nova tentativa em 2s`);
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+}
+
 export function createApp(): FastifyInstance {
   const webhookBodyLimit = Math.max(2_000_000, Math.ceil(Math.max(config.maxAudioBytes, config.maxVideoBytes) * 1.6));
   const app = Fastify({
@@ -124,7 +141,7 @@ export function createApp(): FastifyInstance {
 
 async function main(): Promise<void> {
   validateConfig();
-  await initializeDatabase();
+  await initializeDatabaseWithRetry();
   const app = createApp();
 
   const address = await app.listen({ host: config.host, port: config.port });
@@ -151,8 +168,9 @@ async function main(): Promise<void> {
 }
 
 if (require.main === module) {
-  main().catch((error) => {
+  main().catch(async (error) => {
     console.error(`[startup] ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
+    await pool.end().catch(() => undefined);
+    process.exit(1);
   });
 }
