@@ -19,13 +19,13 @@ npm ci
 cp .env.example .env
 ```
 
-Preencha `.env`, configure um `DATABASE_URL` local, credenciais administrativas fortes, o webhook e as integrações disponíveis. `REPOSITORY_ROOTS` deve conter apenas diretórios autorizados para leitura pelo Codex.
+Preencha `.env`, configure um `DATABASE_URL` local, credenciais administrativas fortes, o webhook e as integrações disponíveis. `OPENAI_API_KEY` é necessária para áudio e vídeo. `REPOSITORY_ROOTS` deve conter apenas diretórios autorizados para leitura pelo Codex.
 
 ```sh
 npm run dev
 ```
 
-O servidor aplica o schema idempotente na inicialização. O worker fica no mesmo processo. A interpretação usa o Codex CLI autenticado com ChatGPT, fixado em `gpt-6-luna`, sem `OPENAI_API_KEY`. A transcrição de voz usa `whisper.cpp` localmente; nenhum áudio é enviado a uma API de transcrição.
+O servidor aplica o schema idempotente na inicialização. O worker fica no mesmo processo. A interpretação das conversas e a análise dos repositórios usam o Codex CLI autenticado com ChatGPT, fixado em `gpt-6-luna`. A transcrição de áudios usa a API da OpenAI com `gpt-transcribe`; configure `OPENAI_API_KEY` no painel ou no `.env`. Os arquivos de áudio são enviados à OpenAI para transcrição em português.
 
 Comandos de verificação local:
 
@@ -106,27 +106,15 @@ Na VPS ARM64, a instância usa `devlikeapro/waha:noweb-arm-2026.10.1`, uma vers�
 
 ### Interpretação com Codex CLI
 
-Instale e autentique o Codex CLI para o mesmo usuário do PM2. O backend verifica `codex login status` e executa `codex exec --model gpt-6-luna` em modo não interativo, read-only e ephemeral, com schema JSON estruturado. O identificador do modelo é fixo por `CODEX_MODEL`; se o CLI não aceitar `gpt-6-luna`, o lote falha com retry e não troca de modelo. Não configure `OPENAI_API_KEY`.
+Instale e autentique o Codex CLI para o mesmo usuário do PM2. O backend verifica `codex login status` e executa `codex exec --model gpt-6-luna` em modo não interativo, read-only e ephemeral, com schema JSON estruturado. O identificador do modelo é fixo por `CODEX_MODEL`; se o CLI não aceitar `gpt-6-luna`, o lote falha com retry e não troca de modelo. A `OPENAI_API_KEY` é usada somente para transcrever áudio e não é passada ao Codex CLI.
 
-### Transcrição local de áudio
+### Transcrição de áudio pela OpenAI
 
-Instale `whisper.cpp` e `ffmpeg`, baixe um modelo multilíngue adequado e configure `WHISPER_CPP_CLI` e `WHISPER_MODEL_PATH`. Exemplo para Ubuntu ARM64/x86_64, compilando a versão `v1.9.5` e usando o modelo multilíngue `small-q5_1`:
-
-```sh
-sudo apt-get install -y --no-install-recommends build-essential cmake ffmpeg
-mkdir -p ~/.local/opt ~/.local/share/whisper
-git clone --branch v1.9.5 --depth 1 https://github.com/ggml-org/whisper.cpp.git ~/.local/opt/whisper.cpp-v1.9.5
-cmake -S ~/.local/opt/whisper.cpp-v1.9.5 -B ~/.local/opt/whisper.cpp-v1.9.5/build -DCMAKE_BUILD_TYPE=Release
-cmake --build ~/.local/opt/whisper.cpp-v1.9.5/build --config Release -j2 --target whisper-cli
-curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin \
-  -o ~/.local/share/whisper/ggml-small-q5_1.bin
-```
-
-O padrão de idioma é `pt`, o modelo `small` multilíngue quantizado é um ponto inicial equilibrado, e `WHISPER_THREADS=1` evita saturar uma VPS de 2 vCPUs. `ffmpeg` converte o áudio recebido para WAV mono 16 kHz antes da transcrição. O modelo é baixado uma vez; a inferência é local. Se faltar o binário/modelo ou a transcrição falhar, o lote registra erro e mantém o áudio armazenado para retry.
+Configure `OPENAI_API_KEY` no painel, em **Transcrição de áudio com OpenAI**, ou no `.env`. O modelo padrão é `gpt-transcribe` (`OPENAI_TRANSCRIPTION_MODEL`), com dica de idioma português (`pt`). Áudios compatíveis são enviados como recebidos; formatos não aceitos pela API são convertidos para WAV com `ffmpeg`. Se faltar a chave ou a transcrição falhar, o lote registra erro e mantém o áudio armazenado para retry. O limite é controlado por `MAX_AUDIO_BYTES` e o timeout por `OPENAI_TRANSCRIPTION_TIMEOUT_MS`.
 
 ### Análise de vídeo
 
-Vídeos passam pelo mesmo worker assíncrono: `ffprobe` verifica faixa e duração; `ffmpeg` extrai a faixa de áudio para o Whisper local e amostra quadros em intervalos regulares; o Codex CLI recebe as imagens com seus timestamps junto do contexto do lote. O Codex analisa quadros estáticos, não o arquivo de vídeo bruto. A amostragem é limitada para controlar tempo e custo, então movimentos muito rápidos entre quadros podem não aparecer na análise.
+Vídeos passam pelo mesmo worker assíncrono: `ffprobe` verifica faixa e duração; `ffmpeg` extrai a faixa de áudio para transcrição pela OpenAI e amostra quadros em intervalos regulares; o Codex CLI recebe a transcrição e as imagens com seus timestamps junto do contexto do lote. O Codex analisa quadros estáticos, não o arquivo de vídeo bruto. A amostragem é limitada para controlar tempo e custo, então movimentos muito rápidos entre quadros podem não aparecer na análise.
 
 Os limites padrão são 50 MB por vídeo, 180 segundos, até 6 quadros por vídeo e 12 quadros por lote. Ajuste `MAX_VIDEO_BYTES`, `VIDEO_MAX_DURATION_SECONDS`, `VIDEO_MAX_FRAMES_PER_MESSAGE`, `VIDEO_MAX_FRAMES_PER_BATCH` e `VIDEO_PROCESSING_TIMEOUT_MS` conforme a capacidade da máquina. `ffprobe` vem no pacote `ffmpeg`; se o executável tiver outro caminho, configure `FFPROBE_CLI`. Legenda, fala transcrita e quadros visuais são enviados juntos ao `gpt-6-luna` pelo Codex CLI. Os quadros temporários são apagados após a interpretação; o vídeo bruto fica no PostgreSQL apenas enquanto o lote precisa de retry e é removido ao concluir.
 
@@ -138,7 +126,7 @@ Issues novas são criadas explicitamente em **Backlog**. Atualizações de refin
 
 Demandas concretas aparecem no Linear assim que identificadas, mesmo quando ainda faltam detalhes. Esses cards recebem a label `Aguardando contexto` e listam as dúvidas pendentes; quando a conversa esclarece o suficiente, o mesmo card é atualizado e a label é removida. A análise técnica do Codex continua aguardando a demanda ficar pronta.
 
-Ao sincronizar uma demanda, o serviço aplica as labels `Tipo: Funcionalidade`, `Tipo: Bug`, `Tipo: Melhoria` ou `Tipo: Alteração`, além de `Projeto: <nome do projeto>`. As labels são criadas no escopo da equipe Linear caso ainda não existam. Em refinamentos, o serviço atualiza as labels gerenciadas e preserva as demais labels adicionadas manualmente.
+Ao sincronizar uma demanda, o serviço aplica as labels `Tipo: Funcionalidade`, `Tipo: Bug`, `Tipo: Melhoria` ou `Tipo: Alteração`, além de `Aguardando contexto` quando a demanda ainda precisa de detalhes. O card é associado ao projeto do Linear configurado, sem criar uma label de projeto. Em refinamentos, o serviço remove antigas labels `Projeto: ...` criadas por versões anteriores e preserva as demais labels adicionadas manualmente.
 
 Os cards usam um modelo editorial curto: objetivo/escopo, requisitos, critérios de aceite, dúvidas pendentes e contexto/decisões. Seções opcionais sem conteúdo são omitidas. O tipo é exibido em português e a análise Codex entra em uma seção separada. O agente tem alvos flexíveis: título normalmente com 5–12 palavras; resumo em 2–3 frases; 2–5 requisitos e 2–4 critérios verificáveis; até 3 dúvidas que possam alterar o escopo. Pedidos simples podem usar menos itens. O sistema valida limites para evitar respostas excessivas: título até 140 caracteres, resumo até 1.800, no máximo 8 requisitos, 6 critérios e 4 dúvidas. O Codex é orientado a escrever normalmente 100–160 palavras, chegando a cerca de 200 em análises realmente complexas, com até 3 caminhos, 3 passos de implementação e 2–3 verificações sugeridas.
 

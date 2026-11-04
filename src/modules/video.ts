@@ -1,4 +1,4 @@
-import { access, chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
@@ -111,12 +111,6 @@ export async function prepareVideo(
 
     let transcript: string | null = null;
     if (options.transcribe && streamTypes.includes('audio')) {
-      if (!config.whisperModelPath) throw new Error('Transcrição local não configurada: WHISPER_MODEL_PATH ausente');
-      try {
-        await access(config.whisperModelPath);
-      } catch {
-        throw new Error('O modelo local não foi encontrado em WHISPER_MODEL_PATH');
-      }
       const wavPath = path.join(directory, 'video-audio.wav');
       await runCaptured(config.ffmpegCli, [
         '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath,

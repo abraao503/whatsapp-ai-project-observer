@@ -6,7 +6,7 @@ import { interpreterStatus } from './modules/interpreter.js';
 import { transcriptionStatus } from './modules/transcription.js';
 import { secureEquals } from './modules/webhook-security.js';
 import { connectWahaSession, getWahaConnection, listWahaChats } from './modules/waha.js';
-import { saveLinearApiKey } from './modules/admin-settings.js';
+import { saveLinearApiKey, saveOpenAIApiKey } from './modules/admin-settings.js';
 import { retryBatch, retryDemand } from './jobs/worker.js';
 
 const adminAuth: preHandlerHookHandler = async (request, reply) => {
@@ -191,6 +191,10 @@ const adminHtml = `<!doctype html>
     <p id="linear-key-status">A chave atual nunca é exibida.</p>
     <form id="linear-key-form"><label for="linear-api-key">Linear API key</label><input id="linear-api-key" name="api_key" type="password" autocomplete="new-password" maxlength="512" placeholder="lin_api_…"><p>Informe uma chave para configurar ou trocar. Deixe vazio para removê-la. Ao salvar, o serviço reinicia para aplicar a alteração.</p><button type="submit">Salvar chave do Linear</button></form>
   </section>
+  <section><h2>Transcrição de áudio com OpenAI</h2>
+    <p id="openai-key-status">A chave atual nunca é exibida.</p>
+    <form id="openai-key-form"><label for="openai-api-key">OpenAI API key</label><input id="openai-api-key" name="api_key" type="password" autocomplete="new-password" maxlength="512" placeholder="sk-…"><p>O áudio será enviado à OpenAI para transcrição em português. Informe uma chave para configurar ou trocar; deixe vazio para removê-la. A alteração é aplicada imediatamente e permanece após reiniciar o serviço.</p><button type="submit">Salvar chave da OpenAI</button></form>
+  </section>
   <div class="grid">
     <section><h2 id="project-form-title">Cadastrar projeto</h2>
       <form id="project-form"><input type="hidden" name="id"><div class="fields">
@@ -229,7 +233,7 @@ const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&a
 function notify(text, error=false){const node=$('#notice');node.textContent=text;node.style.display='block';node.style.background=error?'#922f2f':'#176b4d';setTimeout(()=>node.style.display='none',4500)}
 async function api(path, method='GET', body){const response=await fetch('/admin/api'+path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||('HTTP '+response.status));return data}
 function pill(text, mode=''){return '<span class="pill '+mode+'">'+esc(text)+'</span>'}
-function statusCards(i){const cards=[['PostgreSQL',i.database],['Codex · interpretação',i.interpreter.state+' · '+i.interpreter.model],['Whisper.cpp · áudio/vídeo',i.transcription.state+' · '+i.transcription.model],['Linear',i.linear.configured?'chave configurada':'sem chave'],['Codex CLI',i.codex.installed?i.codex.detail:'não instalado'],['WAHA',i.whatsapp.waha.webhookConfigured?'webhook com HMAC':'HMAC não configurado'],['Evolution API',i.whatsapp.evolution.webhookConfigured?'token configurado':'token não configurado']];$('#status').innerHTML=cards.map(([label,value])=>'<div class="stat"><span>'+esc(label)+'</span><b>'+esc(value)+'</b></div>').join('')+'<div class="stat"><span>Último webhook WAHA</span><b>'+esc(i.whatsapp.waha.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Último webhook Evolution</span><b>'+esc(i.whatsapp.evolution.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Interpretação</span><b>'+esc(i.interpreter.detail)+'</b></div>'+'<div class="stat"><span>Transcrição</span><b>'+esc(i.transcription.detail)+'</b></div>'}
+function statusCards(i){const cards=[['PostgreSQL',i.database],['Codex · interpretação',i.interpreter.state+' · '+i.interpreter.model],['OpenAI · áudio/vídeo',i.transcription.state+' · '+i.transcription.model],['Linear',i.linear.configured?'chave configurada':'sem chave'],['Codex CLI',i.codex.installed?i.codex.detail:'não instalado'],['WAHA',i.whatsapp.waha.webhookConfigured?'webhook com HMAC':'HMAC não configurado'],['Evolution API',i.whatsapp.evolution.webhookConfigured?'token configurado':'token não configurado']];$('#status').innerHTML=cards.map(([label,value])=>'<div class="stat"><span>'+esc(label)+'</span><b>'+esc(value)+'</b></div>').join('')+'<div class="stat"><span>Último webhook WAHA</span><b>'+esc(i.whatsapp.waha.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Último webhook Evolution</span><b>'+esc(i.whatsapp.evolution.lastWebhookAt||'nenhum')+'</b></div>'+'<div class="stat"><span>Interpretação</span><b>'+esc(i.interpreter.detail)+'</b></div>'+'<div class="stat"><span>Transcrição</span><b>'+esc(i.transcription.detail)+'</b></div>';$('#openai-key-status').textContent=i.transcription.state==='configured'?'Chave configurada; o valor nunca é exibido.':'Nenhuma chave OpenAI configurada.'}
 function render(){const s=state;statusCards(s.integrations);
   const selectedProjects=new Set(Array.from($('#conversation-projects').selectedOptions).map(option=>option.value));
   $('#conversation-projects').innerHTML=s.projects.filter(p=>p.active).map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+' (#'+esc(p.id)+')</option>').join('');
@@ -251,6 +255,7 @@ $('#conversation-form').elements.provider.addEventListener('change',()=>{$('#wah
 $('#waha-chat').addEventListener('change',()=>{const chat=wahaChats.find(item=>item.id===$('#waha-chat').value);if(!chat)return;$('#conversation-jid').value=chat.id;$('#conversation-form').elements.display_name.value=chat.name});
 $('#conversation-jid').addEventListener('input',()=>{if($('#conversation-jid').value!==$('#waha-chat').value)$('#waha-chat').value=''});
 $('#linear-key-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const api_key=form.elements.api_key.value;try{await api('/settings/linear','POST',{api_key});form.reset();notify('Chave salva e aplicada.');await refresh()}catch(error){notify(error.message,true)}});
+$('#openai-key-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const api_key=form.elements.api_key.value;try{await api('/settings/openai-transcription','POST',{api_key});form.reset();notify('Chave OpenAI salva e aplicada.');await refresh()}catch(error){notify(error.message,true)}});
 window.editProject=(id)=>{const p=state.projects.find(item=>item.id===id);if(!p)return;const form=$('#project-form');form.elements.id.value=p.id;form.elements.name.value=p.name;form.elements.description.value=p.description;form.elements.repository_path.value=p.repository_path;form.elements.reference_branch.value=p.reference_branch;form.elements.linear_team_id.value=p.linear_team_id;form.elements.linear_project_id.value=p.linear_project_id;form.elements.analysis_instructions.value=p.analysis_instructions;$('#project-form-title').textContent='Editar projeto #'+id;$('#cancel-edit').hidden=false;window.scrollTo({top:0,behavior:'smooth'})};
 window.editConversation=(id)=>{const c=state.conversations.find(item=>item.id===id);if(!c)return;const form=$('#conversation-form');form.elements.provider.value=c.provider;form.elements.instance.value=c.instance;form.elements.remote_jid.value=c.remote_jid;form.elements.display_name.value=c.display_name||'';const ids=new Set((c.projects||[]).map(project=>String(project.id)));for(const option of $('#conversation-projects').options)option.selected=ids.has(option.value);$('#conversation-form').scrollIntoView({behavior:'smooth',block:'center'})};
 window.unmonitor=async(id)=>{if(!confirm('Parar de observar esta conversa?'))return;try{await api('/conversations/'+id,'DELETE');notify('Monitoramento removido; histórico preservado.');await refresh()}catch(e){notify(e.message,true)}};
@@ -307,6 +312,18 @@ export function registerAdminRoutes(app: FastifyInstance): void {
     try {
       await saveLinearApiKey(body.api_key);
       config.linearApiKey = body.api_key.trim();
+      return { ok: true };
+    } catch (error) {
+      return sendApiError(reply, error);
+    }
+  });
+
+  app.post('/admin/api/settings/openai-transcription', { preHandler: adminAuth }, async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.api_key !== 'string') return reply.code(400).send({ error: 'Informe api_key como texto' });
+    try {
+      await saveOpenAIApiKey(body.api_key);
+      config.openaiApiKey = body.api_key.trim();
       return { ok: true };
     } catch (error) {
       return sendApiError(reply, error);

@@ -131,17 +131,7 @@ const typeLabelColors: Record<string, string> = {
   change: '#7F56D9'
 };
 
-const projectLabelColors = ['#27AE60', '#00A3BF', '#F2994A', '#D63384', '#64748B', '#14B8A6'];
-
-function projectLabelColor(projectName: string): string {
-  let hash = 2_166_136_261;
-  for (const character of projectName.trim().toLocaleLowerCase()) {
-    hash = Math.imul(hash ^ character.charCodeAt(0), 16_777_619) >>> 0;
-  }
-  return projectLabelColors[hash % projectLabelColors.length]!;
-}
-
-function labelsFor(demand: LinearDemand, project: LinearProject): LinearLabelSpec[] {
+function labelsFor(demand: LinearDemand): LinearLabelSpec[] {
   const typeLabels: Record<string, string> = {
     feature: 'Funcionalidade',
     bug: 'Bug',
@@ -151,10 +141,7 @@ function labelsFor(demand: LinearDemand, project: LinearProject): LinearLabelSpe
   const typeName = typeLabels[demand.demandType];
   const typeColor = typeLabelColors[demand.demandType];
   if (!typeName || !typeColor) throw new Error(`Tipo de demanda sem label Linear: ${demand.demandType}`);
-  const labels = [
-    { name: `Tipo: ${typeName}`, color: typeColor },
-    { name: `Projeto: ${project.name.trim()}`, color: projectLabelColor(project.name) }
-  ];
+  const labels = [{ name: `Tipo: ${typeName}`, color: typeColor }];
   if (demand.status === 'pending_context') {
     labels.push({ name: 'Aguardando contexto', color: '#F79009' });
   }
@@ -255,7 +242,7 @@ export async function createOrUpdateIssue(
 ): Promise<LinearIssue> {
   if (!project.linearTeamId) throw new Error(`O projeto ${project.name} não tem Linear Team ID`);
   const description = buildLinearDescription(demand, project);
-  const labels = await ensureLabels(labelsFor(demand, project), project.linearTeamId);
+  const labels = await ensureLabels(labelsFor(demand), project.linearTeamId);
   let issueId = demand.linearIssueId;
   if (!issueId) {
     const existing = await findExistingIssue(demand.id, project);

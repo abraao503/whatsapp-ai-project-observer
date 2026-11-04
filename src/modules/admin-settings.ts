@@ -3,11 +3,17 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 const linearKeyPattern = /^[A-Za-z0-9._~+/=-]{16,512}$/;
+const openAiKeyPattern = /^[A-Za-z0-9._~+/=-]{16,512}$/;
 
-export async function saveLinearApiKey(apiKey: string, envFilePath = path.resolve(process.cwd(), '.env')): Promise<void> {
+async function saveApiKey(
+  keyName: 'LINEAR_API_KEY' | 'OPENAI_API_KEY',
+  apiKey: string,
+  pattern: RegExp,
+  envFilePath: string
+): Promise<void> {
   const value = apiKey.trim();
-  if (value && !linearKeyPattern.test(value)) {
-    throw new Error('A chave do Linear deve ter de 16 a 512 caracteres e não pode conter espaços ou quebras de linha');
+  if (value && !pattern.test(value)) {
+    throw new Error(`A chave de ${keyName} deve ter de 16 a 512 caracteres e não pode conter espaços ou quebras de linha`);
   }
 
   const fileInfo = await lstat(envFilePath);
@@ -17,16 +23,16 @@ export async function saveLinearApiKey(apiKey: string, envFilePath = path.resolv
   const updated: string[] = [];
   let keyWritten = false;
   for (const line of lines) {
-    if (/^\s*(?:export\s+)?LINEAR_API_KEY=/.test(line)) {
+    if (new RegExp(`^\\s*(?:export\\s+)?${keyName}=`).test(line)) {
       if (!keyWritten) {
-        updated.push(`LINEAR_API_KEY=${value}`);
+        updated.push(`${keyName}=${value}`);
         keyWritten = true;
       }
     } else {
       updated.push(line);
     }
   }
-  if (!keyWritten) updated.push(`LINEAR_API_KEY=${value}`);
+  if (!keyWritten) updated.push(`${keyName}=${value}`);
   const contents = `${updated.join('\n').replace(/\n+$/, '')}\n`;
   const temporaryPath = `${envFilePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   let fileHandle: Awaited<ReturnType<typeof open>> | undefined;
@@ -40,6 +46,14 @@ export async function saveLinearApiKey(apiKey: string, envFilePath = path.resolv
   } catch (error) {
     await fileHandle?.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
-    throw new Error(`Não foi possível salvar LINEAR_API_KEY no .env: ${error instanceof Error ? error.message : 'erro de arquivo'}`);
+    throw new Error(`Não foi possível salvar ${keyName} no .env: ${error instanceof Error ? error.message : 'erro de arquivo'}`);
   }
+}
+
+export function saveLinearApiKey(apiKey: string, envFilePath = path.resolve(process.cwd(), '.env')): Promise<void> {
+  return saveApiKey('LINEAR_API_KEY', apiKey, linearKeyPattern, envFilePath);
+}
+
+export function saveOpenAIApiKey(apiKey: string, envFilePath = path.resolve(process.cwd(), '.env')): Promise<void> {
+  return saveApiKey('OPENAI_API_KEY', apiKey, openAiKeyPattern, envFilePath);
 }
