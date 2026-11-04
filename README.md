@@ -116,7 +116,11 @@ Configure `OPENAI_API_KEY` no painel, em **Transcrição de áudio com OpenAI**,
 
 Vídeos passam pelo mesmo worker assíncrono: `ffprobe` verifica faixa e duração; `ffmpeg` extrai a faixa de áudio para transcrição pela OpenAI e amostra quadros em intervalos regulares; o Codex CLI recebe a transcrição e as imagens com seus timestamps junto do contexto do lote. O Codex analisa quadros estáticos, não o arquivo de vídeo bruto. A amostragem é limitada para controlar tempo e custo, então movimentos muito rápidos entre quadros podem não aparecer na análise.
 
-Os limites padrão são 50 MB por vídeo, 180 segundos, até 6 quadros por vídeo e 12 quadros por lote. Ajuste `MAX_VIDEO_BYTES`, `VIDEO_MAX_DURATION_SECONDS`, `VIDEO_MAX_FRAMES_PER_MESSAGE`, `VIDEO_MAX_FRAMES_PER_BATCH` e `VIDEO_PROCESSING_TIMEOUT_MS` conforme a capacidade da máquina. `ffprobe` vem no pacote `ffmpeg`; se o executável tiver outro caminho, configure `FFPROBE_CLI`. Legenda, fala transcrita e quadros visuais são enviados juntos ao `gpt-6-luna` pelo Codex CLI. Os quadros temporários são apagados após a interpretação; o vídeo bruto fica no PostgreSQL apenas enquanto o lote precisa de retry e é removido ao concluir.
+Os limites padrão são 50 MB por vídeo, 180 segundos, até 6 quadros por vídeo e 12 quadros por lote. Ajuste `MAX_VIDEO_BYTES`, `VIDEO_MAX_DURATION_SECONDS`, `VIDEO_MAX_FRAMES_PER_MESSAGE`, `VIDEO_MAX_FRAMES_PER_BATCH` e `VIDEO_PROCESSING_TIMEOUT_MS` conforme a capacidade da máquina. `ffprobe` vem no pacote `ffmpeg`; se o executável tiver outro caminho, configure `FFPROBE_CLI`. Legenda, fala transcrita e quadros visuais são enviados juntos ao `gpt-6-luna` pelo Codex CLI. Os quadros temporários são apagados após a interpretação. O vídeo bruto fica no PostgreSQL até os cards vinculados receberem sua evidência; mensagens sem demanda vinculada são limpas ao concluir o lote.
+
+### Evidências de mídia nos cards
+
+Áudios, vídeos, imagens e documentos citados como evidência de uma demanda são enviados ao armazenamento privado do Linear e anexados ao card como recursos. O vínculo entre demanda e mensagem é persistido; falhas são retentadas junto da sincronização Linear e não criam anexos duplicados. Os bytes originais são removidos do PostgreSQL depois que todos os cards vinculados confirmam o anexo. Se o envio não for concluído dentro de `MESSAGE_RETENTION_DAYS`, os bytes são removidos pela política de retenção e o registro fica marcado como expirado. Limites padrão: 25 MB para áudio e mídia genérica, 50 MB para vídeo; configure com `MAX_AUDIO_BYTES`, `MAX_MEDIA_BYTES` e `MAX_VIDEO_BYTES`. No WAHA, habilite o download de mídia para os eventos (`WAHA_EVENTS_DOWNLOAD_MEDIA=true`). Se usar armazenamento S3 no WAHA, configure `WAHA_S3_PROXY_FILES=true` para que os arquivos sejam baixados pela API autenticada configurada em `WAHA_API_URL`.
 
 ### Linear
 
@@ -128,7 +132,7 @@ Demandas concretas aparecem no Linear assim que identificadas, mesmo quando aind
 
 Ao sincronizar uma demanda, o serviço aplica as labels `Tipo: Funcionalidade`, `Tipo: Bug`, `Tipo: Melhoria` ou `Tipo: Alteração`, além de `Aguardando contexto` quando a demanda ainda precisa de detalhes. O card é associado ao projeto do Linear configurado, sem criar uma label de projeto. Em refinamentos, o serviço remove antigas labels `Projeto: ...` criadas por versões anteriores e preserva as demais labels adicionadas manualmente.
 
-Os cards usam um modelo editorial curto: objetivo/escopo, requisitos, critérios de aceite, dúvidas pendentes e contexto/decisões. Seções opcionais sem conteúdo são omitidas. O tipo é exibido em português e a análise Codex entra em uma seção separada. O agente tem alvos flexíveis: título normalmente com 5–12 palavras; resumo em 2–3 frases; 2–5 requisitos e 2–4 critérios verificáveis; até 3 dúvidas que possam alterar o escopo. Pedidos simples podem usar menos itens. O sistema valida limites para evitar respostas excessivas: título até 140 caracteres, resumo até 1.800, no máximo 8 requisitos, 6 critérios e 4 dúvidas. O Codex é orientado a escrever normalmente 100–160 palavras, chegando a cerca de 200 em análises realmente complexas, com até 3 caminhos, 3 passos de implementação e 2–3 verificações sugeridas.
+Os cards usam um modelo editorial curto: objetivo/escopo, requisitos confirmados, dúvidas pendentes e contexto/decisões. Seções opcionais sem conteúdo são omitidas. O agente registra pedidos e decisões das conversas sem propor soluções de implementação nem criar critérios de aceite. O título costuma ter 5–12 palavras; o resumo, 2–3 frases; requisitos e dúvidas ficam limitados ao conteúdo confirmado. O sistema limita o título a 140 caracteres, o resumo a 1.800, os requisitos a 8 e as dúvidas a 4. A análise Codex é factual: descreve o estado atual comprovado no repositório, arquivos envolvidos, evidências observadas e lacunas ou riscos existentes, sem recomendações, plano ou testes propostos.
 
 ### Codex CLI
 
@@ -186,7 +190,7 @@ O lote pendente, suas mensagens, datas, estado, tentativas, erros e agendamento 
 
    `pm2 save` persiste a lista inteira de processos do PM2 daquele usuário. Antes de executá-lo, confirme que os processos existentes que devem voltar após reboot estão presentes na lista; ele não salva somente este app.
 
-4. Configure Nginx como reverse proxy para `127.0.0.1:3105`, TLS HTTPS e limite de corpo adequado a `MAX_AUDIO_BYTES`. Proteja `/admin` com a autenticação do app. O token Evolution faz parte do caminho e deve ser excluído dos access logs Nginx (ou troque a validação para header em um ajuste futuro); não encaminhe a porta da API diretamente à Internet.
+4. Configure Nginx como reverse proxy para `127.0.0.1:3105`, TLS HTTPS e limite de corpo adequado ao maior valor entre `MAX_AUDIO_BYTES`, `MAX_VIDEO_BYTES` e `MAX_MEDIA_BYTES`. Proteja `/admin` com a autenticação do app. O token Evolution faz parte do caminho e deve ser excluído dos access logs Nginx (ou troque a validação para header em um ajuste futuro); não encaminhe a porta da API diretamente à Internet.
 
 Exemplo de configuração de proxy para adaptar ao server block TLS já existente:
 

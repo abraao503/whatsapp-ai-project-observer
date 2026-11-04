@@ -68,7 +68,7 @@ async function initializeDatabaseWithRetry(): Promise<void> {
 }
 
 export function createApp(): FastifyInstance {
-  const webhookBodyLimit = Math.max(2_000_000, Math.ceil(Math.max(config.maxAudioBytes, config.maxVideoBytes) * 1.6));
+  const webhookBodyLimit = Math.max(2_000_000, Math.ceil(Math.max(config.maxAudioBytes, config.maxVideoBytes, config.maxMediaBytes) * 1.6));
   const app = Fastify({
     logger: config.nodeEnv === 'test' ? false : {
       level: config.nodeEnv === 'production' ? 'info' : 'debug',

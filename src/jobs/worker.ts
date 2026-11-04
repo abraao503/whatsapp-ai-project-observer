@@ -4,6 +4,7 @@ import { retryDelayMs } from '../batching.js';
 import { processBatchInterpretation } from '../modules/demands.js';
 import { analyzeRepository, updateRepositoryContext, type CodexTask } from '../modules/codex.js';
 import { createOrUpdateIssue, type LinearDemand, type LinearProject } from '../modules/linear.js';
+import { syncDemandMediaToLinear } from '../modules/media-evidence.js';
 import { interpreterStatus, validateCodexAccess } from '../modules/interpreter.js';
 
 interface ClaimedBatch {
@@ -35,7 +36,6 @@ interface ClaimedCodexJob {
   summary: string;
   demand_type: string;
   requirements: string[];
-  acceptance_criteria: string[];
   open_questions: string[];
   conversation_context: string;
 }
@@ -80,9 +80,12 @@ async function finishBatch(batch: ClaimedBatch): Promise<void> {
       [batch.conversation_id, batch.id]
     );
     await client.query(
-      `UPDATE messages SET video_base64 = NULL WHERE id IN (
-         SELECT message_id FROM batch_messages WHERE batch_id = $1
-       )`,
+      `UPDATE messages m SET audio_base64 = NULL, video_base64 = NULL, media_base64 = NULL
+       WHERE m.id IN (SELECT message_id FROM batch_messages WHERE batch_id = $1)
+         AND NOT EXISTS (
+           SELECT 1 FROM demand_media dm
+           WHERE dm.message_id = m.id AND dm.status NOT IN ('synced', 'expired')
+         )`,
       [batch.id]
     );
   });
@@ -132,7 +135,6 @@ async function claimLinearDemand(): Promise<ClaimedLinearDemand | null> {
       demand_type: string;
       status: string;
       requirements: string[];
-      acceptance_criteria: string[];
       open_questions: string[];
       conversation_context: string;
       technical_analysis: string;
@@ -149,7 +151,7 @@ async function claimLinearDemand(): Promise<ClaimedLinearDemand | null> {
          linear_sync_started_at = now()
        FROM projects p WHERE d.id = $1 AND p.id = d.project_id
        RETURNING d.id, d.project_id, d.title, d.summary, d.demand_type, d.status,
-         d.requirements, d.acceptance_criteria, d.open_questions, d.conversation_context,
+         d.requirements, d.open_questions, d.conversation_context,
          d.technical_analysis, d.version, d.linear_issue_id, d.linear_issue_identifier,
          d.linear_issue_url, d.linear_sync_revision, p.name AS project_name,
          p.linear_team_id, p.linear_project_id`,
@@ -166,7 +168,6 @@ async function claimLinearDemand(): Promise<ClaimedLinearDemand | null> {
       demandType: item.demand_type,
       status: item.status,
       requirements: item.requirements,
-      acceptanceCriteria: item.acceptance_criteria,
       openQuestions: item.open_questions,
       conversationContext: item.conversation_context,
       technicalAnalysis: item.technical_analysis,
@@ -192,13 +193,10 @@ async function processLinearDemand(item: ClaimedLinearDemand): Promise<void> {
       );
       const currentDemand = current.rows[0];
       await client.query(
-        `UPDATE demands SET linear_issue_id = $2, linear_issue_identifier = $3,
-           linear_issue_url = $4, linear_synced_revision = GREATEST(linear_synced_revision, $5),
-           linear_sync_status = CASE WHEN linear_sync_revision > $5 THEN 'pending' ELSE 'synced' END,
-           linear_next_attempt_at = now(),
-           linear_sync_started_at = NULL, linear_error = NULL, updated_at = now()
+        `UPDATE demands SET linear_issue_id = COALESCE(linear_issue_id, $2),
+           linear_issue_identifier = $3, linear_issue_url = $4, updated_at = now()
          WHERE id = $1`,
-        [item.id, issue.id, issue.identifier, issue.url, item.linearSyncRevision]
+        [item.id, issue.id, issue.identifier, issue.url]
       );
       if (currentDemand?.version === item.version && currentDemand.status === 'ready') {
         await client.query(
@@ -213,6 +211,15 @@ async function processLinearDemand(item: ClaimedLinearDemand): Promise<void> {
         );
       }
     });
+    await syncDemandMediaToLinear(item.id, issue.id);
+    await pool.query(
+      `UPDATE demands SET linear_synced_revision = GREATEST(linear_synced_revision, $2),
+         linear_sync_status = CASE WHEN linear_sync_revision > $2 THEN 'pending' ELSE 'synced' END,
+         linear_next_attempt_at = now(), linear_sync_started_at = NULL,
+         linear_error = NULL, updated_at = now()
+       WHERE id = $1`,
+      [item.id, item.linearSyncRevision]
+    );
   } catch (error) {
     const current = await pool.query<{ linear_sync_attempts: number }>(
       'SELECT linear_sync_attempts FROM demands WHERE id = $1', [item.id]
@@ -256,7 +263,7 @@ async function claimCodexJob(): Promise<ClaimedCodexJob | null> {
        RETURNING j.id, j.demand_id, j.demand_version, j.attempts,
          p.id AS project_id, p.name AS project_name, p.repository_path, p.reference_branch,
          p.analysis_instructions, d.title, d.summary, d.demand_type, d.requirements,
-         d.acceptance_criteria, d.open_questions, d.conversation_context`,
+         d.open_questions, d.conversation_context`,
       [row.id]
     );
     return result.rows[0] ?? null;
@@ -271,7 +278,6 @@ async function processCodexJob(job: ClaimedCodexJob): Promise<void> {
       summary: job.summary,
       demandType: job.demand_type,
       requirements: job.requirements,
-      acceptanceCriteria: job.acceptance_criteria,
       openQuestions: job.open_questions,
       conversationContext: job.conversation_context,
       projectName: job.project_name,
@@ -332,7 +338,14 @@ async function processCodexJob(job: ClaimedCodexJob): Promise<void> {
 async function cleanOldData(): Promise<void> {
   if (!config.messageRetentionDays) return;
   await pool.query(
-    `UPDATE messages m SET text = '', transcript = NULL, audio_base64 = NULL, video_base64 = NULL, media = '{}'::jsonb,
+    `UPDATE demand_media SET status = 'expired', last_error = 'Mídia removida pela política de retenção', updated_at = now()
+     WHERE status NOT IN ('synced', 'expired')
+       AND created_at < now() - ($1::text || ' days')::interval`,
+    [config.messageRetentionDays]
+  );
+  await pool.query(
+    `UPDATE messages m SET text = '', transcript = NULL, audio_base64 = NULL, video_base64 = NULL,
+       media_base64 = NULL, media = '{}'::jsonb,
        sender_jid = '', sender_name = '', transcript_error = NULL,
        transcript_status = CASE WHEN kind IN ('audio', 'video') THEN 'expired' ELSE transcript_status END
      WHERE m.received_at < now() - ($1::text || ' days')::interval

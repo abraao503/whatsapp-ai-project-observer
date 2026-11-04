@@ -15,6 +15,7 @@ export interface NormalizedMessage {
   media: Record<string, unknown>;
   audioBase64: string | null;
   videoBase64: string | null;
+  mediaBase64: string | null;
 }
 
 export interface ParseResult {
@@ -115,7 +116,10 @@ function evolutionMessage(instance: string, item: unknown): NormalizedMessage | 
       messageType
     },
     audioBase64: isAudio ? base64 || null : null,
-    videoBase64: isVideo ? pickString(data.base64, message.base64, video.base64, media.base64) || null : null
+    videoBase64: isVideo ? pickString(data.base64, message.base64, video.base64, media.base64) || null : null,
+    mediaBase64: !isAudio && !isVideo
+      ? pickString(data.base64, message.base64, image.base64, document.base64, media.base64) || null
+      : null
   };
 }
 
@@ -172,7 +176,8 @@ function wahaMessage(session: string, item: unknown): NormalizedMessage | null {
       hasMedia
     },
     audioBase64: isAudio ? pickString(payload.base64, media.base64) || null : null,
-    videoBase64: isVideo ? pickString(payload.base64, media.base64) || null : null
+    videoBase64: isVideo ? pickString(payload.base64, media.base64) || null : null,
+    mediaBase64: !isAudio && !isVideo ? pickString(payload.base64, media.base64) || null : null
   };
 }
 

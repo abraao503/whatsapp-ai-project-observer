@@ -18,7 +18,6 @@ export interface LinearDemand {
   demandType: string;
   status: string;
   requirements: string[];
-  acceptanceCriteria: string[];
   openQuestions: string[];
   conversationContext: string;
   technicalAnalysis: string;
@@ -30,6 +29,15 @@ export interface LinearIssue {
   identifier: string;
   url: string;
   title: string;
+}
+
+interface LinearFileUpload {
+  success: boolean;
+  uploadFile: {
+    uploadUrl: string;
+    assetUrl: string;
+    headers: Array<{ key: string; value: string }>;
+  } | null;
 }
 
 interface LinearLabel {
@@ -74,6 +82,71 @@ async function graphql<T>(query: string, variables: Record<string, unknown>): Pr
   return payload.data;
 }
 
+export async function uploadLinearFile(
+  bytes: Buffer,
+  filename: string,
+  contentType: string
+): Promise<string> {
+  const data = await graphql<{ fileUpload: LinearFileUpload }>(
+    `mutation ObserverFileUpload($contentType: String!, $filename: String!, $size: Int!) {
+      fileUpload(contentType: $contentType, filename: $filename, size: $size) {
+        success
+        uploadFile { uploadUrl assetUrl headers { key value } }
+      }
+    }`,
+    { contentType, filename, size: bytes.length }
+  );
+  const { success, uploadFile } = data.fileUpload;
+  if (!success || !uploadFile?.uploadUrl || !uploadFile.assetUrl || !uploadFile.headers) {
+    throw new Error('Linear não retornou os dados necessários para enviar a mídia');
+  }
+  const uploadBody = new ArrayBuffer(bytes.length);
+  new Uint8Array(uploadBody).set(bytes);
+  const headers = new Headers({
+    'Content-Type': contentType,
+    'Cache-Control': 'public, max-age=31536000'
+  });
+  for (const header of uploadFile.headers) headers.set(header.key, header.value);
+  const response = await fetch(uploadFile.uploadUrl, {
+    method: 'PUT',
+    headers,
+    body: uploadBody,
+    signal: AbortSignal.timeout(config.linearFileUploadTimeoutMs)
+  });
+  if (!response.ok) throw new Error(`Upload de mídia ao Linear respondeu HTTP ${response.status}`);
+  return uploadFile.assetUrl;
+}
+
+export async function createLinearIssueAttachment(input: {
+  issueId: string;
+  assetUrl: string;
+  title: string;
+  subtitle: string;
+  metadata: Record<string, unknown>;
+}): Promise<string> {
+  const data = await graphql<{
+    attachmentCreate: { success: boolean; attachment: { id: string } | null };
+  }>(
+    `mutation CreateObserverIssueAttachment($input: AttachmentCreateInput!) {
+      attachmentCreate(input: $input) { success attachment { id } }
+    }`,
+    {
+      input: {
+        issueId: input.issueId,
+        url: input.assetUrl,
+        title: input.title,
+        subtitle: input.subtitle,
+        metadata: input.metadata
+      }
+    }
+  );
+  const attachment = data.attachmentCreate;
+  if (!attachment.success || !attachment.attachment?.id) {
+    throw new Error('Linear não confirmou o vínculo da mídia com o card');
+  }
+  return attachment.attachment.id;
+}
+
 async function backlogStateIdFor(teamId: string): Promise<string> {
   const data = await graphql<{
     workflowStates: { nodes: LinearWorkflowState[] };
@@ -116,7 +189,6 @@ export function buildLinearDescription(demand: LinearDemand, project: LinearProj
     `### Tipo\n${typeLabels[demand.demandType] ?? demand.demandType}`,
     textSection('Objetivo e escopo', demand.summary),
     listSection('Requisitos', demand.requirements),
-    listSection('Critérios de aceite', demand.acceptanceCriteria),
     listSection('Dúvidas pendentes', demand.openQuestions),
     textSection('Contexto e decisões', demand.conversationContext),
     textSection('Análise técnica (Codex)', demand.technicalAnalysis),

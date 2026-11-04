@@ -27,11 +27,14 @@ async function insertMessage(client: PoolClient, message: NormalizedMessage): Pr
   const rawVideo = message.kind === 'video' ? message.videoBase64?.replace(/^data:[^,]+,/, '') ?? '' : '';
   const videoTooLarge = rawVideo.length > config.maxVideoBytes * 1.4;
   const videoBase64 = rawVideo && !videoTooLarge && /^[A-Za-z0-9+/=\r\n]+$/.test(rawVideo) ? rawVideo : null;
+  const rawMedia = message.kind === 'media' ? message.mediaBase64?.replace(/^data:[^,]+,/, '') ?? '' : '';
+  const mediaTooLarge = rawMedia.length > config.maxMediaBytes * 1.4;
+  const mediaBase64 = rawMedia && !mediaTooLarge && /^[A-Za-z0-9+/=\r\n]+$/.test(rawMedia) ? rawMedia : null;
   const inserted = await client.query<{ id: number }>(
     `INSERT INTO messages (
        conversation_id, external_message_id, sent_at, sender_jid, sender_name,
-       from_me, kind, text, media, audio_base64, video_base64, transcript_status
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
+       from_me, kind, text, media, audio_base64, video_base64, media_base64, transcript_status
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12,
        CASE WHEN $7 IN ('audio', 'video') THEN 'pending' ELSE 'not_required' END)
      ON CONFLICT (conversation_id, external_message_id) DO NOTHING
      RETURNING id`,
@@ -48,10 +51,13 @@ async function insertMessage(client: PoolClient, message: NormalizedMessage): Pr
         ...message.media,
         audioPending: message.kind === 'audio' && !audioBase64,
         videoPending: message.kind === 'video' && !videoBase64,
-        videoTooLarge
+        videoTooLarge,
+        mediaPending: message.kind === 'media' && !mediaBase64,
+        mediaTooLarge
       }),
       audioBase64,
-      videoBase64
+      videoBase64,
+      mediaBase64
     ]
   );
   const messageRow = inserted.rows[0];

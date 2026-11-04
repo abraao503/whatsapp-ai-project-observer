@@ -6,6 +6,7 @@ import { interpret } from './interpreter.js';
 import { transcribeAudio } from './transcription.js';
 import { allocateVideoFrameCounts, prepareVideo, type PreparedVideo } from './video.js';
 import type { NormalizedMessage } from './whatsapp.js';
+import { downloadWhatsappMedia } from './whatsapp-media.js';
 import { normalizeDemandTitle } from './whatsapp.js';
 
 interface BatchRow {
@@ -38,7 +39,6 @@ interface ExistingDemand {
   type: string;
   status: string;
   requirements: string[];
-  acceptanceCriteria: string[];
   openQuestions: string[];
   conversationContext: string;
   linearIssueId: string | null;
@@ -85,38 +85,6 @@ function mediaMimeType(media: Record<string, unknown>): string {
   return mimeType.startsWith('audio/') ? mimeType : 'audio/ogg';
 }
 
-async function readResponseBytes(
-  response: Response,
-  maxBytes: number,
-  label: 'áudio' | 'vídeo',
-  limitName: 'MAX_AUDIO_BYTES' | 'MAX_VIDEO_BYTES'
-): Promise<Buffer> {
-  const contentLength = Number(response.headers.get('content-length') ?? 0);
-  if (contentLength > maxBytes) throw new Error(`O ${label} excede ${limitName}`);
-  if (!response.body) throw new Error(`A resposta de mídia não contém ${label}`);
-
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
-        await reader.cancel();
-        throw new Error(`O ${label} excede ${limitName}`);
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  }
-  if (!totalBytes) throw new Error(`O arquivo de ${label} recebido está vazio`);
-  return Buffer.concat(chunks, totalBytes);
-}
-
 async function loadAudioBytes(message: StoredMessage): Promise<Buffer> {
   if (message.audioBase64) {
     const bytes = Buffer.from(message.audioBase64.replace(/\s/g, ''), 'base64');
@@ -124,26 +92,7 @@ async function loadAudioBytes(message: StoredMessage): Promise<Buffer> {
     if (bytes.length > config.maxAudioBytes) throw new Error('O áudio excede MAX_AUDIO_BYTES');
     return bytes;
   }
-  const mediaUrl = typeof message.media.url === 'string' ? message.media.url : '';
-  const apiUrl = message.provider === 'waha' ? config.wahaApiUrl : config.evolutionApiUrl;
-  const apiKey = message.provider === 'waha' ? config.wahaApiKey : config.evolutionApiKey;
-  if (!apiUrl || !mediaUrl) throw new Error('Áudio preservado sem base64; configure webhookBase64 ou a URL de mídia da API');
-
-  let mediaPath: string;
-  try {
-    mediaPath = new URL(mediaUrl, 'http://local.invalid').pathname + new URL(mediaUrl, 'http://local.invalid').search;
-  } catch {
-    throw new Error('URL de mídia de áudio inválida');
-  }
-  if (!mediaPath.startsWith('/api/files/')) throw new Error('A URL de mídia deve apontar para /api/files/');
-  const headers: Record<string, string> = {};
-  if (apiKey) headers[message.provider === 'waha' ? 'X-Api-Key' : 'apikey'] = apiKey;
-  const response = await fetch(`${apiUrl}${mediaPath}`, {
-    headers,
-    signal: AbortSignal.timeout(30_000)
-  });
-  if (!response.ok) throw new Error(`Download do áudio respondeu HTTP ${response.status}`);
-  return readResponseBytes(response, config.maxAudioBytes, 'áudio', 'MAX_AUDIO_BYTES');
+  return downloadWhatsappMedia(message.provider, message.media, config.maxAudioBytes, 'áudio');
 }
 
 async function loadVideoBytes(message: StoredMessage, storedBase64 = message.videoBase64): Promise<Buffer> {
@@ -153,27 +102,7 @@ async function loadVideoBytes(message: StoredMessage, storedBase64 = message.vid
     if (bytes.length > config.maxVideoBytes) throw new Error('O vídeo excede MAX_VIDEO_BYTES');
     return bytes;
   }
-  const mediaUrl = typeof message.media.url === 'string' ? message.media.url : '';
-  const apiUrl = message.provider === 'waha' ? config.wahaApiUrl : config.evolutionApiUrl;
-  const apiKey = message.provider === 'waha' ? config.wahaApiKey : config.evolutionApiKey;
-  if (!apiUrl || !mediaUrl) throw new Error('Vídeo preservado sem base64; configure webhookBase64 ou a URL de mídia da API');
-
-  let mediaPath: string;
-  try {
-    const parsed = new URL(mediaUrl, 'http://local.invalid');
-    mediaPath = parsed.pathname + parsed.search;
-  } catch {
-    throw new Error('URL de mídia de vídeo inválida');
-  }
-  if (!mediaPath.startsWith('/api/files/')) throw new Error('A URL de mídia deve apontar para /api/files/');
-  const headers: Record<string, string> = {};
-  if (apiKey) headers[message.provider === 'waha' ? 'X-Api-Key' : 'apikey'] = apiKey;
-  const response = await fetch(`${apiUrl}${mediaPath}`, {
-    headers,
-    signal: AbortSignal.timeout(30_000)
-  });
-  if (!response.ok) throw new Error(`Download do vídeo respondeu HTTP ${response.status}`);
-  return readResponseBytes(response, config.maxVideoBytes, 'vídeo', 'MAX_VIDEO_BYTES');
+  return downloadWhatsappMedia(message.provider, message.media, config.maxVideoBytes, 'vídeo');
 }
 
 async function transcribeBatchAudios(batchId: number): Promise<void> {
@@ -210,6 +139,7 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
       media: row.media,
       audioBase64: row.audio_base64,
       videoBase64: null,
+      mediaBase64: null,
       transcript: null,
       transcriptStatus: row.transcript_status
     };
@@ -218,9 +148,9 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
       const transcript = await transcribeAudio(bytes, mediaMimeType(row.media));
       await pool.query(
         `UPDATE messages SET transcript = $2, transcript_status = 'done',
-          transcript_error = NULL, audio_base64 = NULL
+          transcript_error = NULL, audio_base64 = COALESCE(audio_base64, $3)
          WHERE id = $1`,
-        [row.id, transcript]
+        [row.id, transcript, bytes.toString('base64')]
       );
     } catch (error) {
       const messageText = error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800);
@@ -250,6 +180,10 @@ async function prepareBatchVideos(messages: StoredMessage[]): Promise<PreparedBa
         'SELECT video_base64 FROM messages WHERE id = $1', [message.id]
       );
       const bytes = await loadVideoBytes(message, stored.rows[0]?.video_base64 ?? null);
+      await pool.query(
+        'UPDATE messages SET video_base64 = COALESCE(video_base64, $2) WHERE id = $1',
+        [message.id, bytes.toString('base64')]
+      );
       const prepared = await prepareVideo(bytes, videoMimeType(message.media), {
         frameCount: frameCounts[index] ?? 0,
         transcribe: message.transcriptStatus !== 'done'
@@ -309,11 +243,12 @@ async function readBatch(batchId: number): Promise<{ batch: BatchRow; messages: 
     text: string;
     media: Record<string, unknown>;
     audio_base64: string | null;
+    media_base64: string | null;
     transcript: string | null;
     transcript_status: string;
   }>(
     `SELECT m.id, m.external_message_id, m.sent_at, m.sender_jid, m.sender_name,
-       m.from_me, m.kind, m.text, m.media, m.audio_base64, m.transcript, m.transcript_status
+       m.from_me, m.kind, m.text, m.media, m.audio_base64, m.media_base64, m.transcript, m.transcript_status
      FROM batch_messages bm JOIN messages m ON m.id = bm.message_id
      WHERE bm.batch_id = $1 ORDER BY m.sent_at, m.id`,
     [batchId]
@@ -333,6 +268,7 @@ async function readBatch(batchId: number): Promise<{ batch: BatchRow; messages: 
     media: row.media,
     audioBase64: row.audio_base64,
     videoBase64: null,
+    mediaBase64: row.media_base64,
     transcript: row.transcript,
     transcriptStatus: row.transcript_status
   }));
@@ -364,7 +300,6 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
       demand_type: string;
       status: string;
       requirements: string[];
-      acceptance_criteria: string[];
       open_questions: string[];
       conversation_context: string;
       linear_issue_id: string | null;
@@ -373,7 +308,7 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
       technical_analysis: string;
     }>(
       `SELECT id, version, title, summary, demand_type, status, requirements,
-         acceptance_criteria, open_questions, conversation_context, linear_issue_id,
+         open_questions, conversation_context, linear_issue_id,
          linear_sync_status, linear_sync_revision, technical_analysis
        FROM demands WHERE project_id = $1 AND status <> 'cancelled'
        ORDER BY updated_at DESC LIMIT 40`,
@@ -388,7 +323,6 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
       type: row.demand_type,
       status: row.status,
       requirements: row.requirements,
-      acceptanceCriteria: row.acceptance_criteria,
       openQuestions: row.open_questions,
       conversationContext: row.conversation_context,
       linearIssueId: row.linear_issue_id,
@@ -486,6 +420,17 @@ function cleanList(values: string[], maxItems: number, maxLength: number): strin
     .slice(0, maxItems);
 }
 
+async function queueDemandMedia(client: PoolClient, demandId: number, messageIds: bigint[]): Promise<void> {
+  if (!messageIds.length) return;
+  await client.query(
+    `INSERT INTO demand_media(demand_id, message_id)
+     SELECT $1, m.id FROM messages m
+     WHERE m.id = ANY($2::bigint[]) AND m.kind IN ('audio', 'video', 'media')
+     ON CONFLICT (demand_id, message_id) DO NOTHING`,
+    [demandId, messageIds.map((id) => id.toString())]
+  );
+}
+
 async function upsertDemand(
   client: PoolClient,
   projectId: number,
@@ -497,7 +442,6 @@ async function upsertDemand(
   const title = action.title.trim().slice(0, 140);
   const summary = action.summary.trim().slice(0, 1_800);
   const requirements = cleanList(action.requirements, 8, 400);
-  const acceptanceCriteria = cleanList(action.acceptanceCriteria, 6, 400);
   const openQuestions = cleanList(action.openQuestions, 4, 300);
   const conversationContext = conversationSummary.trim().slice(0, conversationSummaryLimit);
   if (title.length < 6 || summary.length < 5 || action.confidence < 0.55) return;
@@ -524,17 +468,15 @@ async function upsertDemand(
     const nextSummary = summary || existing.summary;
     const nextType = action.type || existing.type;
     const nextRequirements = requirements.length ? requirements : existing.requirements;
-    const nextAcceptanceCriteria = acceptanceCriteria.length ? acceptanceCriteria : existing.acceptanceCriteria;
     const changed = nextTitle !== existing.title || nextSummary !== existing.summary || nextType !== existing.type ||
       JSON.stringify(nextRequirements) !== JSON.stringify(existing.requirements) ||
-      JSON.stringify(nextAcceptanceCriteria) !== JSON.stringify(existing.acceptanceCriteria) ||
       JSON.stringify(openQuestions) !== JSON.stringify(existing.openQuestions) ||
       nextStatus !== existing.status || conversationContext !== existing.conversationContext;
     if (changed) {
       await client.query(
         `UPDATE demands SET title = $2, summary = $3, demand_type = $4, status = $5,
-           requirements = $6::jsonb, acceptance_criteria = $7::jsonb, open_questions = $8::jsonb,
-           conversation_context = $9, version = version + 1,
+           requirements = $6::jsonb, acceptance_criteria = '[]'::jsonb, open_questions = $7::jsonb,
+           conversation_context = $8, version = version + 1,
            technical_analysis = '',
            linear_sync_revision = linear_sync_revision + 1,
            linear_next_attempt_at = now(),
@@ -546,8 +488,7 @@ async function upsertDemand(
          WHERE id = $1`,
         [
           existing.id, nextTitle, nextSummary, nextType, nextStatus,
-          JSON.stringify(nextRequirements), JSON.stringify(nextAcceptanceCriteria),
-          JSON.stringify(openQuestions), conversationContext
+          JSON.stringify(nextRequirements), JSON.stringify(openQuestions), conversationContext
         ]
       );
       existing.version += 1;
@@ -556,7 +497,6 @@ async function upsertDemand(
       existing.type = nextType;
       existing.status = nextStatus;
       existing.requirements = nextRequirements;
-      existing.acceptanceCriteria = nextAcceptanceCriteria;
       existing.openQuestions = openQuestions;
       existing.conversationContext = conversationContext;
       existing.technicalAnalysis = '';
@@ -567,6 +507,7 @@ async function upsertDemand(
         [existing.id, messageId.toString()]
       );
     }
+    await queueDemandMedia(client, existing.id, messageIds);
     return;
   }
 
@@ -576,12 +517,11 @@ async function upsertDemand(
     `INSERT INTO demands(
        project_id, title, summary, demand_type, status, requirements, acceptance_criteria,
        open_questions, conversation_context, linear_sync_status, linear_sync_revision
-     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11)
+     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, '[]'::jsonb, $7::jsonb, $8, $9, $10)
      RETURNING id`,
     [
       projectId, title, summary, action.type, nextStatus,
-      JSON.stringify(requirements), JSON.stringify(acceptanceCriteria), JSON.stringify(openQuestions),
-      conversationContext, 'pending', 1
+      JSON.stringify(requirements), JSON.stringify(openQuestions), conversationContext, 'pending', 1
     ]
   );
   const demandId = created.rows[0]!.id;
@@ -591,6 +531,7 @@ async function upsertDemand(
       [demandId, messageId.toString()]
     );
   }
+  await queueDemandMedia(client, demandId, messageIds);
   demands.push({
     id: demandId,
     version: 1,
@@ -600,7 +541,6 @@ async function upsertDemand(
     type: action.type,
     status: nextStatus,
     requirements,
-    acceptanceCriteria,
     openQuestions,
     conversationContext,
     linearIssueId: null,

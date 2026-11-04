@@ -53,7 +53,6 @@ export interface Interpretation {
     summary: string;
     type: 'feature' | 'bug' | 'improvement' | 'change';
     requirements: string[];
-    acceptanceCriteria: string[];
     openQuestions: string[];
     ready: boolean;
     confidence: number;
@@ -118,7 +117,7 @@ const interpretationSchema = {
         additionalProperties: false,
         required: [
           'action', 'demandId', 'demandVersion', 'projectId', 'title', 'summary', 'type', 'requirements',
-          'acceptanceCriteria', 'openQuestions', 'ready', 'confidence', 'decision', 'evidenceMessageIds'
+          'openQuestions', 'ready', 'confidence', 'decision', 'evidenceMessageIds'
         ],
         properties: {
           action: { type: 'string', enum: ['new', 'update', 'cancel', 'decision', 'ignore'] },
@@ -129,7 +128,6 @@ const interpretationSchema = {
           summary: { type: 'string', maxLength: 1_800 },
           type: { type: 'string', enum: ['feature', 'bug', 'improvement', 'change'] },
           requirements: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 400 } },
-          acceptanceCriteria: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 400 } },
           openQuestions: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 300 } },
           ready: { type: 'boolean' },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -153,10 +151,12 @@ REGRAS DE SEGURANÇA E CLASSIFICAÇÃO:
 - Use apenas projectId e demandId apresentados no contexto. Não invente identificadores.
 - Ao atualizar/cancelar, copie demandId e version exatos do contexto. Para uma demanda nova, use demandId=null e demandVersion=null.
 - Cite como evidência somente IDs incluídos nas mensagens do lote atual. Sem evidência atual, não faça alteração.
+- Quando áudio, vídeo, imagem ou documento acompanhar ou for mencionado como suporte a uma demanda, inclua o ID da mensagem em evidenceMessageIds da demanda correspondente. Não associe mídia claramente ligada a outro assunto nem invente seu conteúdo.
 - Respostas do próprio operador (fromMe=true) são decisões/requisitos e podem mudar a demanda.
 - Marque ready=true somente quando houver objetivo e ao menos um comportamento esperado que possa ser conferido. Dúvidas complementares podem continuar listadas se não mudarem o objetivo ou o escopo central; se a resposta puder mudar substancialmente o trabalho, use ready=false.
 - Diferencie feature, bug, improvement e change. Cancelamentos devem usar action=cancel.
 - Registre decisões explícitas com action=decision e decision preenchida.
+- Registre o que foi pedido e confirmado, sem propor soluções, planos de implementação ou testes.
 - O resumo da conversa é cumulativo, factual e útil no próximo lote. Limite-o a 1 ou 2 frases; registre decisões e contexto que ajudem a interpretar refinamentos futuros, sem copiar o histórico inteiro.
 - Retorne actions=[] para mensagens sem impacto em demanda ou contexto.`;
 
@@ -166,13 +166,12 @@ PADRÃO DE ESCRITA DAS DEMANDAS:
 Use os campos como um modelo orientador, não como uma lista de itens a preencher por obrigação. Adapte a quantidade de detalhe ao tamanho e à complexidade do pedido. As quantidades abaixo são alvos; nunca invente ou repita conteúdo para alcançá-las.
 - Título: descreva resultado ou ação específica, normalmente com 5 a 12 palavras e até cerca de 100 caracteres. Evite títulos vagos como "Ajustar tela" ou "Melhorar sistema".
 - Resumo: explique o problema ou objetivo e o escopo combinado. Use normalmente 2 ou 3 frases (aproximadamente 35 a 80 palavras); uma correção simples pode caber em 1 ou 2 frases. Não antecipe uma solução técnica que não foi discutida.
-- Requisitos: registre normalmente 2 a 5 comportamentos concretos, um por item. Preserve formatos, filtros, atores, regras e restrições que tenham sido confirmados. Não transforme suposições em requisitos.
-- Critérios de aceite: escreva normalmente 2 a 4 resultados observáveis que permitam confirmar a entrega. Eles devem complementar os requisitos, sem repeti-los com outras palavras. Use linguagem testável e não acrescente requisitos de desempenho, segurança ou compatibilidade sem evidência.
+- Requisitos: registre comportamentos concretos que foram pedidos ou confirmados. Preserve formatos, filtros, atores, regras e restrições mencionados. Não transforme suposições em requisitos.
 - Dúvidas pendentes: inclua de 0 a 3 perguntas somente quando a resposta puder alterar escopo, comportamento ou uma decisão importante. Não liste detalhes opcionais que não bloqueiam o trabalho.
 - Contexto e decisões: use 1 ou 2 frases curtas, normalmente até 50 palavras, apenas para registrar motivação, restrição ou decisão relevante que ainda não esteja clara nos outros campos. Não replique o resumo nem transcreva mensagens.
 - Para bugs, diferencie comportamento observado e esperado; acrescente impacto e passos para reproduzir somente quando estiverem nas mensagens. Para funcionalidades, destaque o resultado para o usuário e as regras já acordadas. Para melhorias e alterações, deixe claro o comportamento atual e o resultado desejado quando ambos forem conhecidos.
 - Prefira o idioma usado predominantemente na conversa. Use termos simples, frases diretas e listas curtas. Evite introduções, adjetivos promocionais, repetição e detalhes técnicos sem relação com o pedido.
-- Como referência, o conteúdo da demanda antes da análise técnica deve ser escaneável em cerca de 100 a 250 palavras. Demandas simples podem ser menores; demandas com regras independentes podem ser maiores, respeitando os limites do schema.`;
+- Como referência, o conteúdo da demanda antes da análise técnica deve ser escaneável em cerca de 80 a 180 palavras. Demandas simples podem ser menores; demandas com regras independentes podem ser maiores, respeitando os limites do schema.`;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -225,7 +224,6 @@ function validateInterpretation(value: unknown): Interpretation {
       summary: action.summary,
       type: demandType as Interpretation['actions'][number]['type'],
       requirements: boundedStringList(action.requirements, 'requirements', 8, 400),
-      acceptanceCriteria: boundedStringList(action.acceptanceCriteria, 'acceptanceCriteria', 6, 400),
       openQuestions: boundedStringList(action.openQuestions, 'openQuestions', 4, 300),
       ready: action.ready,
       confidence: action.confidence,

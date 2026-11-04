@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS messages (
   media JSONB NOT NULL DEFAULT '{}'::jsonb,
   audio_base64 TEXT,
   video_base64 TEXT,
+  media_base64 TEXT,
   transcript TEXT,
   transcript_status TEXT NOT NULL DEFAULT 'not_required',
   transcript_error TEXT,
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS video_base64 TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_base64 TEXT;
 
 CREATE TABLE IF NOT EXISTS batches (
   id BIGSERIAL PRIMARY KEY,
@@ -113,6 +115,19 @@ CREATE TABLE IF NOT EXISTS demand_messages (
   PRIMARY KEY (demand_id, message_id)
 );
 
+CREATE TABLE IF NOT EXISTS demand_media (
+  demand_id BIGINT NOT NULL REFERENCES demands(id) ON DELETE CASCADE,
+  message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  linear_asset_url TEXT,
+  linear_attachment_id TEXT,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (demand_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS codex_jobs (
   id BIGSERIAL PRIMARY KEY,
   demand_id BIGINT NOT NULL REFERENCES demands(id) ON DELETE CASCADE,
@@ -148,6 +163,7 @@ CREATE INDEX IF NOT EXISTS batches_conversation_idx ON batches(conversation_id, 
 CREATE INDEX IF NOT EXISTS messages_conversation_time_idx ON messages(conversation_id, sent_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS demands_project_status_idx ON demands(project_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS demands_linear_sync_idx ON demands(linear_sync_status, updated_at);
+CREATE INDEX IF NOT EXISTS demand_media_status_idx ON demand_media(demand_id, status);
 CREATE INDEX IF NOT EXISTS codex_jobs_ready_idx ON codex_jobs(status, next_attempt_at, created_at, id);
 CREATE INDEX IF NOT EXISTS app_errors_recent_idx ON app_errors(created_at DESC);
 `;
