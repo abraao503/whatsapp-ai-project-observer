@@ -6,11 +6,94 @@ import { analyzeRepository, updateRepositoryContext, type CodexTask } from '../m
 import { createOrUpdateIssue, type LinearDemand, type LinearProject } from '../modules/linear.js';
 import { syncDemandMediaToLinear } from '../modules/media-evidence.js';
 import { interpreterStatus, validateCodexAccess } from '../modules/interpreter.js';
+import { downloadWhatsappMedia, MediaDownloadHttpError, MediaUnavailableError } from '../modules/whatsapp-media.js';
 
 interface ClaimedBatch {
   id: number;
   conversation_id: number;
   attempts: number;
+}
+
+interface ClaimedMediaDownload {
+  message_id: number;
+  attempts: number;
+  provider: 'evolution' | 'waha';
+  kind: 'audio' | 'video' | 'media';
+  media: Record<string, unknown>;
+}
+
+const mediaDownloadMaxAttempts = 5;
+
+function mediaDownloadRetryDelayMs(attempt: number): number {
+  return Math.min(5_000 * 2 ** Math.max(0, attempt - 1), 60_000);
+}
+
+async function claimMediaDownload(): Promise<ClaimedMediaDownload | null> {
+  return inTransaction(async (client) => {
+    const candidate = await client.query<{ message_id: number }>(
+      `SELECT j.message_id
+       FROM media_download_jobs j
+       WHERE j.status = 'pending' AND j.next_attempt_at <= now()
+       ORDER BY j.next_attempt_at, j.created_at, j.message_id
+       LIMIT 1 FOR UPDATE OF j SKIP LOCKED`
+    );
+    const row = candidate.rows[0];
+    if (!row) return null;
+    const claimed = await client.query<ClaimedMediaDownload>(
+      `UPDATE media_download_jobs j SET status = 'processing', attempts = attempts + 1,
+         started_at = now(), last_error = NULL
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id
+       WHERE j.message_id = $1 AND m.id = j.message_id
+       RETURNING j.message_id, j.attempts, c.provider, m.kind, m.media`,
+      [row.message_id]
+    );
+    return claimed.rows[0] ?? null;
+  });
+}
+
+async function processMediaDownload(job: ClaimedMediaDownload): Promise<void> {
+  const field = job.kind === 'audio' ? 'audio_base64'
+    : job.kind === 'video' ? 'video_base64' : 'media_base64';
+  const pendingFlag = job.kind === 'audio' ? 'audioPending'
+    : job.kind === 'video' ? 'videoPending' : 'mediaPending';
+  const maxBytes = job.kind === 'audio' ? config.maxAudioBytes
+    : job.kind === 'video' ? config.maxVideoBytes : config.maxMediaBytes;
+  const label = job.kind === 'audio' ? 'áudio' : job.kind === 'video' ? 'vídeo' : 'mídia';
+
+  try {
+    const bytes = await downloadWhatsappMedia(job.provider, job.media, maxBytes, label);
+    const base64 = bytes.toString('base64');
+    await inTransaction(async (client) => {
+      await client.query(
+        `UPDATE messages SET ${field} = COALESCE(${field}, $2),
+           media = media || jsonb_build_object($3::text, false)
+         WHERE id = $1`,
+        [job.message_id, base64, pendingFlag]
+      );
+      await client.query(
+        `UPDATE media_download_jobs SET status = 'done', completed_at = now(),
+           started_at = NULL, last_error = NULL WHERE message_id = $1`,
+        [job.message_id]
+      );
+    });
+  } catch (error) {
+    const terminal = error instanceof MediaUnavailableError || job.attempts >= mediaDownloadMaxAttempts;
+    const message = safeErrorMessage(error);
+    await pool.query(
+      `UPDATE media_download_jobs SET status = $2, last_error = $3, started_at = NULL,
+         next_attempt_at = now() + ($4::bigint * interval '1 millisecond'),
+         completed_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END
+       WHERE message_id = $1`,
+      [job.message_id, terminal ? 'failed' : 'pending', message,
+        terminal ? 0 : mediaDownloadRetryDelayMs(job.attempts)]
+    );
+    await recordError('media-download', error, {
+      messageId: job.message_id,
+      attempt: job.attempts,
+      final: terminal,
+      statusCode: error instanceof MediaDownloadHttpError ? error.statusCode : undefined
+    });
+  }
 }
 
 interface ClaimedLinearDemand extends LinearDemand {
@@ -50,7 +133,12 @@ async function claimBatch(): Promise<ClaimedBatch | null> {
          AND NOT EXISTS (
            SELECT 1 FROM batches earlier
            WHERE earlier.conversation_id = b.conversation_id
-             AND earlier.id < b.id AND earlier.status IN ('pending', 'processing', 'failed')
+             AND earlier.id < b.id AND earlier.status IN ('pending', 'processing')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM batch_messages bm
+           JOIN media_download_jobs j ON j.message_id = bm.message_id
+           WHERE bm.batch_id = b.id AND j.status IN ('pending', 'processing')
          )
        ORDER BY b.process_after, b.id
        LIMIT 1 FOR UPDATE OF c SKIP LOCKED`
@@ -93,7 +181,7 @@ async function finishBatch(batch: ClaimedBatch): Promise<void> {
 
 async function failBatch(batch: ClaimedBatch, error: unknown): Promise<void> {
   const message = safeErrorMessage(error);
-  const failed = batch.attempts >= config.batchMaxAttempts;
+  const failed = batch.attempts >= config.batchMaxAttempts || error instanceof MediaUnavailableError;
   await inTransaction(async (client) => {
     await client.query(
       `UPDATE batches SET status = $2, process_after = now() + ($3::bigint * interval '1 millisecond'),
@@ -376,6 +464,7 @@ export function startWorker(): { stop: () => void } {
   let busy = false;
   let stopping = false;
   let activeBatches = 0;
+  let activeMediaDownloads = 0;
   let activeCodex = 0;
   let activeLinear = false;
   let lastCodexValidation = Date.now();
@@ -447,6 +536,14 @@ export function startWorker(): { stop: () => void } {
     if (busy || stopping) return;
     busy = true;
     try {
+      while (activeMediaDownloads < config.maxParallelBatches) {
+        const job = await claimMediaDownload();
+        if (!job) break;
+        activeMediaDownloads += 1;
+        void processMediaDownload(job)
+          .catch((error) => recordError('media-download-worker', error, { messageId: job.message_id }))
+          .finally(() => { activeMediaDownloads -= 1; });
+      }
       if (interpreterStatus().state !== 'available' && Date.now() - lastCodexValidation > 5 * 60_000) {
         lastCodexValidation = Date.now();
         const status = await validateCodexAccess();
@@ -499,13 +596,32 @@ export function startWorker(): { stop: () => void } {
 }
 
 export async function retryBatch(batchId: number): Promise<boolean> {
-  const result = await pool.query(
-    `UPDATE batches SET status = 'pending', process_after = now(), last_error = NULL,
-       processing_started_at = NULL
-     WHERE id = $1 AND status = 'failed'`,
-    [batchId]
-  );
-  return Boolean(result.rowCount);
+  return inTransaction(async (client) => {
+    const result = await client.query<{ id: number }>(
+      `UPDATE batches b SET status = 'pending', process_after = now(), last_error = NULL,
+         processing_started_at = NULL
+       WHERE b.id = $1 AND b.status = 'failed'
+         AND NOT EXISTS (
+           SELECT 1 FROM batches later
+           WHERE later.conversation_id = b.conversation_id AND later.id > b.id
+             AND later.status IN ('done', 'processing')
+         )
+       RETURNING b.id`,
+      [batchId]
+    );
+    if (!result.rowCount) return false;
+    await client.query(
+      `UPDATE media_download_jobs j SET status = 'pending', attempts = 0,
+         next_attempt_at = now(), last_error = NULL, started_at = NULL, completed_at = NULL
+       FROM batch_messages bm JOIN messages m ON m.id = bm.message_id
+       WHERE bm.batch_id = $1 AND j.message_id = m.id AND j.status = 'failed'
+         AND ((m.kind = 'audio' AND m.audio_base64 IS NULL)
+           OR (m.kind = 'video' AND m.video_base64 IS NULL)
+           OR (m.kind = 'media' AND m.media_base64 IS NULL))`,
+      [batchId]
+    );
+    return true;
+  });
 }
 
 export async function retryDemand(demandId: number, job: 'linear' | 'codex'): Promise<boolean> {

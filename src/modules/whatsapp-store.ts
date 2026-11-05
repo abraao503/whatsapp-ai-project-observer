@@ -63,6 +63,22 @@ async function insertMessage(client: PoolClient, message: NormalizedMessage): Pr
   const messageRow = inserted.rows[0];
   if (!messageRow) return 'duplicate';
 
+  const hasStoredMedia = message.kind === 'audio' ? Boolean(audioBase64)
+    : message.kind === 'video' ? Boolean(videoBase64)
+      : message.kind === 'media' ? Boolean(mediaBase64) : true;
+  if (!hasStoredMedia && ['audio', 'video', 'media'].includes(message.kind)) {
+    const hasMediaUrl = typeof message.media.url === 'string' && message.media.url.length > 0;
+    await client.query(
+      `INSERT INTO media_download_jobs(message_id, status, last_error)
+       VALUES ($1, $2, $3) ON CONFLICT (message_id) DO NOTHING`,
+      [
+        messageRow.id,
+        hasMediaUrl ? 'pending' : 'failed',
+        hasMediaUrl ? null : 'O webhook não preservou uma URL para baixar a mídia'
+      ]
+    );
+  }
+
   const receivedAt = new Date();
   const pending = await client.query<{
     id: number;
@@ -80,7 +96,9 @@ async function insertMessage(client: PoolClient, message: NormalizedMessage): Pr
   );
   const current = pending.rows[0];
   let batchId: number;
-  if (!current || shouldStartNewBatch(Number(current.message_count), config.batchMaxMessages)) {
+  const maxWaitReached = current &&
+    current.first_received_at.getTime() + config.batchMaxWaitMs <= receivedAt.getTime();
+  if (!current || maxWaitReached || shouldStartNewBatch(Number(current.message_count), config.batchMaxMessages)) {
     const processAfter = nextProcessAfter(
       { firstReceivedAt: receivedAt, lastReceivedAt: receivedAt },
       config.batchIdleMs,

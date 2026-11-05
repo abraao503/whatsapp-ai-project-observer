@@ -6,7 +6,7 @@ import { interpret } from './interpreter.js';
 import { transcribeAudio } from './transcription.js';
 import { allocateVideoFrameCounts, prepareVideo, type PreparedVideo } from './video.js';
 import type { NormalizedMessage } from './whatsapp.js';
-import { downloadWhatsappMedia } from './whatsapp-media.js';
+import { downloadWhatsappMedia, MediaUnavailableError } from './whatsapp-media.js';
 import { normalizeDemandTitle } from './whatsapp.js';
 
 interface BatchRow {
@@ -88,8 +88,8 @@ function mediaMimeType(media: Record<string, unknown>): string {
 async function loadAudioBytes(message: StoredMessage): Promise<Buffer> {
   if (message.audioBase64) {
     const bytes = Buffer.from(message.audioBase64.replace(/\s/g, ''), 'base64');
-    if (!bytes.length) throw new Error('O áudio recebido está vazio');
-    if (bytes.length > config.maxAudioBytes) throw new Error('O áudio excede MAX_AUDIO_BYTES');
+    if (!bytes.length) throw new MediaUnavailableError('O áudio recebido está vazio');
+    if (bytes.length > config.maxAudioBytes) throw new MediaUnavailableError('O áudio excede MAX_AUDIO_BYTES');
     return bytes;
   }
   return downloadWhatsappMedia(message.provider, message.media, config.maxAudioBytes, 'áudio');
@@ -112,11 +112,15 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
     audio_base64: string | null;
     media: Record<string, unknown>;
     transcript_status: string;
+    media_download_status: string | null;
+    media_download_error: string | null;
   }>(
-    `SELECT m.id, c.provider, m.audio_base64, m.media, m.transcript_status
+    `SELECT m.id, c.provider, m.audio_base64, m.media, m.transcript_status,
+       j.status AS media_download_status, j.last_error AS media_download_error
      FROM batch_messages bm
      JOIN messages m ON m.id = bm.message_id
      JOIN conversations c ON c.id = m.conversation_id
+     LEFT JOIN media_download_jobs j ON j.message_id = m.id
      WHERE bm.batch_id = $1 AND m.kind = 'audio'
        AND m.transcript_status <> 'done'
      ORDER BY m.sent_at, m.id`,
@@ -124,6 +128,9 @@ async function transcribeBatchAudios(batchId: number): Promise<void> {
   );
 
   for (const row of result.rows) {
+    if (!row.audio_base64 && row.media_download_status === 'failed') {
+      throw new MediaUnavailableError(row.media_download_error || 'O áudio não foi preservado antes de expirar no provedor');
+    }
     const message: StoredMessage = {
       id: row.id,
       provider: row.provider as StoredMessage['provider'],

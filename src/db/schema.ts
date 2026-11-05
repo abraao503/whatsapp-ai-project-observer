@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS messages (
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS video_base64 TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_base64 TEXT;
 
+CREATE TABLE IF NOT EXISTS media_download_jobs (
+  message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_error TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS batches (
   id BIGSERIAL PRIMARY KEY,
   conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -160,6 +171,7 @@ CREATE TABLE IF NOT EXISTS app_state (
 
 CREATE INDEX IF NOT EXISTS batches_ready_idx ON batches(status, process_after, id);
 CREATE INDEX IF NOT EXISTS batches_conversation_idx ON batches(conversation_id, id, status);
+CREATE INDEX IF NOT EXISTS media_download_jobs_ready_idx ON media_download_jobs(status, next_attempt_at, created_at);
 CREATE INDEX IF NOT EXISTS messages_conversation_time_idx ON messages(conversation_id, sent_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS demands_project_status_idx ON demands(project_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS demands_linear_sync_idx ON demands(linear_sync_status, updated_at);

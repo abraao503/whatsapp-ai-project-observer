@@ -142,11 +142,15 @@ Instale e autentique o Codex CLI para o mesmo usuário que executa a aplicação
 
 Use uma instância separada daquelas pertencentes a outros projetos. Esta VPS usa host networking para que o webhook WAHA alcance o backend em `127.0.0.1:3105`; a API WAHA escuta em wildcard nesta imagem, portanto a firewall do host precisa rejeitar conexões de entrada na porta 3201. Não adicione uma regra de liberação nem exponha a porta por Nginx. Exemplo para a imagem ARM64 usada nesta VPS, sem Docker Compose:
 
+O WAHA remove arquivos locais após 180 segundos por padrão. O Observer baixa mídias em jobs persistidos assim que as recebe; mantenha uma janela de 24 horas no WAHA para sobreviver a reinícios ou indisponibilidade temporária do worker. O volume abaixo preserva a mídia se o container WAHA reiniciar, e o próprio WAHA limpa os arquivos ao fim do prazo.
+
 ```sh
 docker run --detach --name whatsapp-observer-waha \
   --restart unless-stopped --network host --memory 2g --cpus 1 \
+  --env WHATSAPP_FILES_LIFETIME=86400 \
   --env-file /home/ubuntu/.config/whatsapp-observer/waha.env \
   --volume /home/ubuntu/.local/share/whatsapp-observer/waha-sessions:/app/.sessions \
+  --volume /home/ubuntu/.local/share/whatsapp-observer/waha-media:/tmp/whatsapp-files \
   devlikeapro/waha:noweb-arm-2026.10.1
 ```
 
@@ -161,7 +165,9 @@ Padrões iniciais configuráveis no `.env`:
 - Limite: `BATCH_MAX_MESSAGES=30`.
 - Concorrência entre conversas: `MAX_PARALLEL_BATCHES=2`.
 
-O lote pendente, suas mensagens, datas, estado, tentativas, erros e agendamento ficam no PostgreSQL. Cada conversa tem apenas um lote em execução. Uma nova mensagem durante a análise fica no próximo lote; processos podem executar em paralelo para conversas diferentes. Lotes falhos bloqueiam os posteriores da mesma conversa até retry, para preservar a sequência contextual.
+O lote pendente, suas mensagens, datas, estado, tentativas, erros e agendamento ficam no PostgreSQL. Cada conversa tem apenas um lote em execução. Uma nova mensagem durante a análise fica no próximo lote; processos podem executar em paralelo para conversas diferentes. Lotes falhos em estado terminal ficam visíveis, mas não bloqueiam os posteriores. Um retry manual é recusado quando um lote posterior já foi processado, para não inverter a sequência.
+
+Mídias com URL são enfileiradas para download assim que o webhook é persistido. O worker salva os bytes no PostgreSQL antes da interpretação e recupera downloads interrompidos após reiniciar. O prazo máximo do lote também é respeitado quando a fila atrasa.
 
 `MESSAGE_RETENTION_DAYS` controla o conteúdo bruto. Mensagens antigas sem vínculo a demandas são excluídas; mensagens citadas por demandas mantêm seus IDs de evidência, mas texto, transcrição, mídia e dados do remetente são apagados. Demandas consolidadas, resumos e issues do Linear permanecem para acompanhar o trabalho.
 

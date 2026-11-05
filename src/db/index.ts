@@ -19,6 +19,30 @@ export const pool = new Pool({
 export async function initializeDatabase(): Promise<void> {
   await pool.query(schemaSql);
   await pool.query(`
+    UPDATE media_download_jobs SET status = 'pending', next_attempt_at = now(), started_at = NULL,
+      last_error = COALESCE(last_error, 'Download retomado após reinício do serviço')
+    WHERE status = 'processing'
+  `);
+  await pool.query(`
+    INSERT INTO media_download_jobs(message_id, status, last_error)
+    SELECT m.id,
+      CASE WHEN COALESCE(m.media->>'url', '') <> '' THEN 'pending' ELSE 'failed' END,
+      CASE WHEN COALESCE(m.media->>'url', '') <> '' THEN NULL ELSE 'O webhook não preservou uma URL para baixar a mídia' END
+    FROM messages m
+    WHERE m.kind IN ('audio', 'video', 'media')
+      AND ((m.kind = 'audio' AND m.audio_base64 IS NULL AND m.transcript_status IN ('pending', 'failed'))
+        OR (m.kind = 'video' AND m.video_base64 IS NULL AND m.transcript_status IN ('pending', 'failed'))
+        OR (m.kind = 'media' AND m.media_base64 IS NULL AND EXISTS (
+          SELECT 1 FROM batches b JOIN batch_messages bm ON bm.batch_id = b.id
+          WHERE bm.message_id = m.id AND b.status IN ('pending', 'processing', 'failed')
+        ))
+        OR EXISTS (
+          SELECT 1 FROM demand_media dm
+          WHERE dm.message_id = m.id AND dm.status NOT IN ('synced', 'expired')
+        ))
+      AND NOT EXISTS (SELECT 1 FROM media_download_jobs j WHERE j.message_id = m.id)
+  `);
+  await pool.query(`
     UPDATE batches
     SET status = 'pending', process_after = now(), processing_started_at = NULL,
         last_error = COALESCE(last_error, 'Processamento retomado após reinício do serviço')

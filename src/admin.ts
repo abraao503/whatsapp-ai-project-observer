@@ -447,7 +447,7 @@ export function registerAdminRoutes(app: FastifyInstance): void {
   app.post<{ Params: { id: string } }>('/admin/api/batches/:id/retry', { preHandler: adminAuth }, async (request, reply) => {
     try {
       const ok = await retryBatch(positiveId(request.params.id, 'ID do lote'));
-      return ok ? { ok: true } : reply.code(409).send({ error: 'O lote não está falho' });
+      return ok ? { ok: true } : reply.code(409).send({ error: 'O lote não está falho ou já há um lote posterior processado' });
     } catch (error) {
       return sendApiError(reply, error);
     }
