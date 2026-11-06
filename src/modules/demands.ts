@@ -375,9 +375,13 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
      ORDER BY m.sent_at DESC, m.id DESC LIMIT 8`,
     [batch.conversation_id, batch.id]
   );
+  const groupConversation = batch.remote_jid.endsWith('@g.us');
+  const speaker = (fromMe: boolean) => fromMe
+    ? 'Operador'
+    : groupConversation ? 'Participante do grupo' : 'Cliente';
   const recentMessages = previous.rows.reverse().map((row) => ({
     id: String(row.id),
-    sender: row.from_me ? 'Operador' : row.sender_name || row.sender_jid || 'Contato',
+    sender: speaker(row.from_me),
     fromMe: row.from_me,
     text: row.transcript || row.text || `[${row.kind}]`
   }));
@@ -393,7 +397,7 @@ async function buildContext(batch: BatchRow, messages: StoredMessage[]): Promise
     return {
       id: String(message.id),
       sentAt: message.sentAt.toISOString(),
-      sender: message.fromMe ? 'Operador' : message.senderName || message.senderJid || 'Contato',
+      sender: speaker(message.fromMe),
       fromMe: message.fromMe,
       kind: message.kind,
       text: textParts.filter(Boolean).join('\n') || `[${message.kind}]`
@@ -572,6 +576,7 @@ async function applyInterpretation(
   await inTransaction(async (client) => {
     for (const action of interpretation.actions) {
       if (action.action === 'ignore') continue;
+      if (action.projectRelevance !== 'direct') continue;
       const evidence = action.evidenceMessageIds
         .filter((id) => Number.isSafeInteger(Number(id)) && messageIds.has(Number(id)));
       if (!evidence.length) continue;

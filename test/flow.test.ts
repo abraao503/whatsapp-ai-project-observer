@@ -57,7 +57,7 @@ process.stdin.on('end', async () => {
       conversationSummary: update ? 'Cliente pediu exportação em Excel e confirmou filtros por data e funcionário.' : 'Cliente pediu exportação de relatórios em Excel.',
       actions: [{
         action: update ? 'update' : 'new', demandId: prior?.id ?? null, demandVersion: prior?.version ?? null,
-        projectId: project.id,
+        projectId: project.id, projectRelevance: 'direct',
         title: update ? 'Exportar relatórios em Excel com filtros' : 'Exportar relatórios em Excel',
         summary: update ? 'Exportar os relatórios em Excel, com filtros por data e funcionário.' : 'Permitir exportar os relatórios para uma planilha Excel.',
         type: 'feature',

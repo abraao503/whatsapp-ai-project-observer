@@ -128,7 +128,7 @@ Configure ou troque `LINEAR_API_KEY` diretamente no painel, em **Configuração 
 
 Issues novas são criadas explicitamente em **Backlog**. Atualizações de refinamento preservam a coluna escolhida no Linear; a descrição não repete um status interno, então a coluna do Linear é a única fonte do status de trabalho.
 
-Demandas concretas aparecem no Linear assim que identificadas, mesmo quando ainda faltam detalhes. Esses cards recebem a label `Aguardando contexto` e listam as dúvidas pendentes; quando a conversa esclarece o suficiente, o mesmo card é atualizado e a label é removida. A análise técnica do Codex continua aguardando a demanda ficar pronta.
+Demandas aparecem no Linear assim que identificadas, mesmo quando ainda faltam detalhes. Esses cards recebem a label `Aguardando contexto` e listam as dúvidas pendentes; quando a conversa esclarece o suficiente, o mesmo card é atualizado e a label é removida. A análise técnica do Codex continua aguardando a demanda ficar pronta. Antes de aplicar cada ação, o interpretador também precisa confirmar relação direta entre o assunto e o projeto; o vínculo da conversa, sozinho, não define o projeto do assunto.
 
 Ao sincronizar uma demanda, o serviço aplica as labels `Tipo: Funcionalidade`, `Tipo: Bug`, `Tipo: Melhoria` ou `Tipo: Alteração`, além de `Aguardando contexto` quando a demanda ainda precisa de detalhes. O card é associado ao projeto do Linear configurado, sem criar uma label de projeto. Em refinamentos, o serviço remove antigas labels `Projeto: ...` criadas por versões anteriores e preserva as demais labels adicionadas manualmente.
 
