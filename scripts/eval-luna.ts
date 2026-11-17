@@ -22,8 +22,8 @@ function context(
     videoFrames: [],
     projects: [{
       id: 1,
-      name: 'Projeto sintético para avaliação',
-      description: 'Contexto de exemplo; nenhuma conversa real será usada.',
+      name: '7agentes (avaliação)',
+      description: 'Sistema de atendimento com agente virtual, callbacks, encerramento de contatos e relatórios.',
       technicalInstructions: '',
       demands
     }],
@@ -47,6 +47,34 @@ async function main(): Promise<void> {
   const status = await validateCodexAccess();
   assert.equal(status.state, 'available', status.detail);
   assert.equal(status.model, model);
+
+  const existingClosureBehavior = {
+    id: 2429,
+    version: 8,
+    title: 'Encerrar contato quando a Clara retorna ENCERRADO',
+    summary: 'Quando a Clara retorna o status ENCERRADO, enviar ao cliente o texto de messages e finalizar o contato sem encaminhá-lo à fila.',
+    type: 'bug' as const,
+    status: 'ready',
+    requirements: [
+      'Enviar o texto de encerramento retornado pela Clara.',
+      'Finalizar o contato sem encaminhá-lo à fila.'
+    ],
+    openQuestions: []
+  };
+  const separateCallbackBug = await interpret(context([
+    message('570', 'Atendimentos em que o cliente some há mais de 24h ficam presos com a Clara; não consigo encerrar pelo callback. Com mensagem, 182 de 250 retornam 422 MESSAGE_DELIVERY_FAILED. Com messages vazio, a validação responde que o array precisa ter ao menos um item. O callback deve encerrar mesmo sem entrega ou quando messages estiver vazio.'),
+    message('571', 'Bom dia. Consigo', true)
+  ], [existingClosureBehavior], 'A demanda existente cobre o encerramento pelo status ENCERRADO retornado pela Clara.'));
+  assert.ok(separateCallbackBug.actions.some((action) =>
+    action.action === 'new' && action.demandId === null && action.demandRelation === 'new_independent'
+  ), `bug de callback deve ser separado do encerramento por status ENCERRADO: ${JSON.stringify(separateCallbackBug)}`);
+  assert.ok(!separateCallbackBug.actions.some((action) =>
+    action.action === 'update' && action.demandId === existingClosureBehavior.id
+  ), `semelhança de tema não deve fundir o bug com a demanda anterior: ${JSON.stringify(separateCallbackBug)}`);
+  if (process.argv.includes('--identity-only')) {
+    console.log(JSON.stringify({ model, case: 'bug distinto na mesma área', result: separateCallbackBug }, null, 2));
+    return;
+  }
 
   const initial = await interpret(context([
     message('101', 'Precisamos exportar os relatórios mensais da folha.'),
@@ -72,30 +100,6 @@ async function main(): Promise<void> {
     action.action === 'update' && action.demandId === 4242 && action.demandVersion === 3 &&
     action.demandRelation === 'same_existing' && action.matchReason.length >= 20
   ), 'refinamento deveria apontar para o ID e a versão existentes');
-
-  const existingClosureBehavior = {
-    id: 2429,
-    version: 8,
-    title: 'Encerrar contato quando a Clara retorna ENCERRADO',
-    summary: 'Quando a Clara retorna o status ENCERRADO, enviar ao cliente o texto de messages e finalizar o contato sem encaminhá-lo à fila.',
-    type: 'bug' as const,
-    status: 'ready',
-    requirements: [
-      'Enviar o texto de encerramento retornado pela Clara.',
-      'Finalizar o contato sem encaminhá-lo à fila.'
-    ],
-    openQuestions: []
-  };
-  const separateCallbackBug = await interpret(context([
-    message('570', 'Atendimentos em que o cliente some há mais de 24h ficam presos com a Clara; não consigo encerrar pelo callback. Com mensagem, 182 de 250 retornam 422 MESSAGE_DELIVERY_FAILED. Com messages vazio, a validação responde que o array precisa ter ao menos um item. O callback deve encerrar mesmo sem entrega ou quando messages estiver vazio.'),
-    message('571', 'Bom dia. Consigo', true)
-  ], [existingClosureBehavior], 'A demanda existente cobre o encerramento pelo status ENCERRADO retornado pela Clara.'));
-  assert.ok(separateCallbackBug.actions.some((action) =>
-    action.action === 'new' && action.demandId === null && action.demandRelation === 'new_independent'
-  ), 'bug de callback com falha de entrega ou messages vazio deve ser separado do encerramento por status ENCERRADO');
-  assert.ok(!separateCallbackBug.actions.some((action) =>
-    action.action === 'update' && action.demandId === existingClosureBehavior.id
-  ), 'semelhança de tema não deve fundir o bug com a demanda anterior');
 
   const multiple = await interpret(context([
     message('301', 'Na ficha do cliente, mostrar uma prévia dos anexos antes de baixar.'),
