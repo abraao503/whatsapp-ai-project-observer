@@ -317,16 +317,15 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     assert.ok(operations.some((operation) => operation.name === 'find'));
     const createOperation = operations.find((operation) => operation.name === 'create')!;
     const createInput = createOperation.variables.input as { description: string; labelIds: string[] };
-    assert.equal(createInput.labelIds.length, 2);
-    assert.deepEqual(currentIssueLabels.map((label) => label.name), ['Tipo: Funcionalidade', 'Projeto: Projeto de teste']);
+    assert.equal(createInput.labelIds.length, 1);
+    assert.deepEqual(currentIssueLabels.map((label) => label.name), ['Tipo: Funcionalidade']);
     assert.notEqual(currentIssueLabels[0]?.color, currentIssueLabels[1]?.color);
     const createdDescription = createInput.description;
     assert.match(createdDescription, /### Objetivo e escopo/);
     assert.match(createdDescription, /### Requisitos/);
-    assert.match(createdDescription, /### Critérios de aceite/);
     assert.match(createdDescription, /### Contexto e decisões/);
     assert.match(createdDescription, /### Tipo\nFuncionalidade/);
-    assert.doesNotMatch(createdDescription, /### Dúvidas pendentes|Não identificado/);
+    assert.doesNotMatch(createdDescription, /### Critérios de aceite|### Dúvidas pendentes|Não identificado/);
     assert.ok(createdDescription.length > 150 && createdDescription.length < 3_000);
 
     const refined = {
@@ -348,12 +347,12 @@ test('mock WhatsApp request creates a Linear card and a later refinement edits t
     const updated = await createOrUpdateIssue(refined, project);
     assert.equal(updated.id, created.id);
     assert.equal(operations.filter((operation) => operation.name === 'create').length, 1);
-    const updateVariables = operations.findLast((operation) => operation.name === 'update')!.variables;
+    const updateVariables = operations.filter((operation) => operation.name === 'update').at(-1)!.variables;
     assert.equal(updateVariables.id, 'issue-101');
     assert.equal((updateVariables.input as { title: string }).title, refined.title);
     assert.match((updateVariables.input as { description: string }).description, /Filtrar por data e funcionário/);
     assert.deepEqual(currentIssueLabels.map((label) => label.name).sort(),
-      ['Prioridade manual', 'Projeto: Projeto de teste', 'Tipo: Bug'].sort());
+      ['Prioridade manual', 'Tipo: Bug'].sort());
     assert.equal(labels.find((label) => label.name === 'Tipo: Bug')?.color, '#D92D20');
   } finally {
     globalThis.fetch = originalFetch;
