@@ -59,6 +59,10 @@ process.stdin.on('end', () => {
     const prompt = await readFile(promptPath, 'utf8');
     assert.match(prompt, /"timestampSeconds":1\.5/);
     assert.match(prompt, /mesma ordem/);
+    assert.match(prompt, /identidade da demanda/i);
+    assert.match(prompt, /sintoma observável, o gatilho\/reprodução e o resultado esperado/);
+    assert.match(prompt, /mesmo projeto, módulo, endpoint/);
+    assert.match(prompt, /demandas separadas/);
     assert.ok(args.includes('--sandbox') && args[args.indexOf('--sandbox') + 1] === 'read-only');
   } finally {
     for (const [name, value] of Object.entries(original)) {

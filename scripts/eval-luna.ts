@@ -69,8 +69,33 @@ async function main(): Promise<void> {
     openQuestions: []
   }], 'O cliente pediu exportação CSV da folha, com filtros por período e funcionário.'));
   assert.ok(refined.actions.some((action) =>
-    action.action === 'update' && action.demandId === 4242 && action.demandVersion === 3
+    action.action === 'update' && action.demandId === 4242 && action.demandVersion === 3 &&
+    action.demandRelation === 'same_existing' && action.matchReason.length >= 20
   ), 'refinamento deveria apontar para o ID e a versão existentes');
+
+  const existingClosureBehavior = {
+    id: 2429,
+    version: 8,
+    title: 'Encerrar contato quando a Clara retorna ENCERRADO',
+    summary: 'Quando a Clara retorna o status ENCERRADO, enviar ao cliente o texto de messages e finalizar o contato sem encaminhá-lo à fila.',
+    type: 'bug' as const,
+    status: 'ready',
+    requirements: [
+      'Enviar o texto de encerramento retornado pela Clara.',
+      'Finalizar o contato sem encaminhá-lo à fila.'
+    ],
+    openQuestions: []
+  };
+  const separateCallbackBug = await interpret(context([
+    message('570', 'Atendimentos em que o cliente some há mais de 24h ficam presos com a Clara; não consigo encerrar pelo callback. Com mensagem, 182 de 250 retornam 422 MESSAGE_DELIVERY_FAILED. Com messages vazio, a validação responde que o array precisa ter ao menos um item. O callback deve encerrar mesmo sem entrega ou quando messages estiver vazio.'),
+    message('571', 'Bom dia. Consigo', true)
+  ], [existingClosureBehavior], 'A demanda existente cobre o encerramento pelo status ENCERRADO retornado pela Clara.'));
+  assert.ok(separateCallbackBug.actions.some((action) =>
+    action.action === 'new' && action.demandId === null && action.demandRelation === 'new_independent'
+  ), 'bug de callback com falha de entrega ou messages vazio deve ser separado do encerramento por status ENCERRADO');
+  assert.ok(!separateCallbackBug.actions.some((action) =>
+    action.action === 'update' && action.demandId === existingClosureBehavior.id
+  ), 'semelhança de tema não deve fundir o bug com a demanda anterior');
 
   const multiple = await interpret(context([
     message('301', 'Na ficha do cliente, mostrar uma prévia dos anexos antes de baixar.'),
@@ -89,6 +114,7 @@ async function main(): Promise<void> {
     cases: [
       { name: 'nova demanda clara', passed: true, result: initial },
       { name: 'refinamento aponta para mesma demanda', passed: true, result: refined },
+      { name: 'bug distinto na mesma área não é fundido', passed: true, result: separateCallbackBug },
       { name: 'duas demandas independentes no lote', passed: true, result: multiple },
       { name: 'mensagem vaga ignorada', passed: true, result: vague }
     ]
